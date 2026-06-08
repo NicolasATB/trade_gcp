@@ -1,0 +1,3 @@
+ccxt>=4.3
+google-cloud-bigquery>=3.20
+tenacity>=8.2
