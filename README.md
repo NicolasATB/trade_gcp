@@ -1,0 +1,319 @@
+# BTC RSI Trading-Signal Pipeline on GCP
+
+A daily, fully reproducible data pipeline that ingests BTC/USD candles, computes
+the **RSI** indicator, derives a **BUY / SELL / NEUTRAL** signal, and sends a
+**Telegram alert only when the signal changes**.
+
+The project doubles as a **Data Engineer portfolio piece**: an end-to-end pipeline
+on Google Cloud — ingestion → storage → processing → orchestration → alerting —
+that is versioned, containerized, and provisioned as code.
+
+> ⚠️ **Disclaimer — not financial advice.** The RSI signal logic is a technical /
+> educational example, not an investment recommendation. The value of this project
+> is in the data engineering, not in any expectation of returns.
+
+---
+
+## Table of contents
+
+- [Architecture](#architecture)
+- [Daily data flow](#daily-data-flow)
+- [Date ranges & cleanup](#date-ranges--cleanup)
+- [Data model (medallion)](#data-model-medallion)
+- [Repository layout](#repository-layout)
+- [Tech stack & design decisions](#tech-stack--design-decisions)
+- [Setup & deployment](#setup--deployment)
+- [Testing & CI](#testing--ci)
+- [Roadmap](#roadmap)
+- [Out of scope](#out-of-scope)
+- [License](#license)
+
+---
+
+## Architecture
+
+| Layer            | Tool                                 | Role in one line                                          |
+|------------------|--------------------------------------|-----------------------------------------------------------|
+| Repository       | GitHub                               | Code, IaC and CI/CD                                       |
+| Orchestration    | Apache Airflow on an **e2-micro VM** | Schedules and triggers the daily DAG; runs the tasks      |
+| Ingestion        | Python + CCXT (Binance)              | Downloads the daily BTC candle to **bronze** (DAG task)   |
+| Storage          | BigQuery (**medallion** model)       | `control`, `strategy`, `bronze`, `silver`, `gold`         |
+| Processing       | Dataflow (Apache Beam)               | Conforms to silver, computes RSI, derives the signal in gold |
+| Alerting         | Telegram Bot                         | Notifies only when the signal changes (DAG task)          |
+| Infrastructure   | Terraform                            | Defines BigQuery + VM as code (IaC)                       |
+| CI/CD            | GitHub Actions                       | Lint + tests (pytest) on every push                       |
+
+```mermaid
+flowchart LR
+    SCHED["Airflow scheduler<br/>(@daily, on the VM)"] --> ING
+
+    subgraph VM["e2-micro VM (Airflow)"]
+        ING["Ingest<br/>PythonOperator"]
+        ALERT["Alert<br/>PythonOperator"]
+    end
+
+    subgraph GCP["Managed GCP services"]
+        BQ[("BigQuery<br/>medallion")]
+        DF["Dataflow<br/>(Apache Beam)"]
+    end
+
+    ING -->|raw candle| BQ
+    ING --> DF
+    DF -->|reads OHLCV + params| BQ
+    DF -->|writes RSI + signal| BQ
+    BQ -->|last signal| ALERT
+    ALERT -->|"send only if changed"| TG["Telegram"]
+```
+
+The ingestion and alert tasks run **inside Airflow** as `PythonOperator`s on the
+same e2-micro VM. **Dataflow does not run on the VM**: Airflow only *launches* it,
+and the job executes on managed GCP workers.
+
+---
+
+## Daily data flow
+
+1. **Airflow scheduler** (on the VM) fires the DAG according to its daily cron.
+2. **Ingest — `PythonOperator`:** runs `airflow/ingest/binance_ingest.py`,
+   downloads the daily BTC/USDT candle from Binance via CCXT and writes it to
+   `prod_trade_bronze.binance_btcusd_daily_raw` (idempotent MERGE on
+   `symbol + candle_date`).
+3. **Conform to silver — Dataflow (`stages/conform.py`):**
+   - Reads the daily candle from bronze, normalizes fields and writes to
+     `prod_trade_silver.ohlcv_validated` (`temporality='1d'`).
+   - Aggregates the current week's daily candles into a weekly candle and MERGEs
+     it into `ohlcv_validated` (`temporality='1w'`), keeping the weekly RSI fresh
+     every day.
+4. **RSI to silver — Dataflow (`stages/rsi.py`):** computes RSI with **Wilder
+   smoothing** (recursive state: `var_p_recursive`, `var_n_recursive`) for **two
+   temporalities**: `1d` (daily) and `1w` (weekly). Writes to
+   `prod_trade_silver.rsi_features`. Full bootstrap on the first run; incremental
+   update on every subsequent run.
+5. **Signal to gold — Dataflow (`stages/signals.py`):** reads the active
+   parameters from `prod_trade_strategy.strategy_rsi_daily_week`, runs a
+   walk-forward over the weekly-RSI history to derive a **per-week** trend state,
+   and for each daily candle in the range applies its week's state together with
+   the daily-RSI thresholds to produce BUY / SELL / NEUTRAL. Writes to
+   `prod_trade_gold.fact_signals` with a `trigger_params` JSON column.
+6. **Alert — `PythonOperator`:** runs `airflow/alerts/`, reads the latest signal
+   from `fact_signals` and sends it to Telegram **only if it changed** versus the
+   previous one.
+
+> Steps 3–5 are Beam pipeline *stages* launched sequentially from
+> `dataflow/pipeline.py`; steps 2 and 6 are `PythonOperator`s on the VM.
+
+---
+
+## Date ranges & cleanup
+
+**Date range (batch / backfill).** Both ingestion and the Dataflow pipeline accept
+a range:
+
+- Ingestion: `ingest_daily_candles(start_date, end_date)` (`--start/--end` in the CLI).
+- Dataflow: `--start_date/--end_date` (`end` optional; if omitted only `start` is
+  processed; with neither, both default to yesterday — the daily job).
+
+`conform` reads the range from bronze and recomputes every touched week; `rsi` stays
+incremental over the recursive state (it processes any new candle, ideal for
+contiguous forward ranges); `signals` emits one signal per day in the range using
+the trend state of the corresponding week.
+
+**Cleanup (reset / backward backfill).** `dataflow/cleanup.py` deletes rows from the
+silver and gold tables (`ohlcv_validated`, `rsi_features`, `fact_signals`) with
+optional, independent filters: `--symbol`, `--temporality`, `--start`, `--end` (no
+filter = delete everything; `--dry-run` counts without deleting; `--layer` picks
+silver/gold/both). Emptying `rsi_features` forces the RSI to redo its bootstrap —
+useful when backfilling history older than the last recursive state.
+
+---
+
+## Data model (medallion)
+
+Storage follows a **medallion architecture** on BigQuery (project `trade-390514`,
+region `us-central1`). The complete, authoritative DDL lives in `sql/DDL.sql`
+(PK/FK constraints are declared `NOT ENFORCED` — BigQuery uses them as
+documentation and optimizer hints only).
+
+| Dataset                  | Layer    | Purpose                                                                 |
+|--------------------------|----------|-------------------------------------------------------------------------|
+| `prod_trade_control`     | Control  | Operational metadata: source registry and consolidation priority.       |
+| `prod_trade_strategy`    | Strategy | Strategy catalog and versioned parameters per strategy.                 |
+| `prod_trade_bronze`      | Bronze   | Raw landing zone — one table per source, as delivered.                  |
+| `prod_trade_silver`      | Silver   | Conformed, typed, de-duplicated OHLCV plus derived indicator features.  |
+| `prod_trade_gold`        | Gold     | Business outcomes (trading signals) as a star-schema fact table.        |
+
+**Control — `prod_trade_control`**
+- `source_priority` — source registry with `source_id` (PK), `label`, `priority`,
+  `is_active`, `url_source`, `name_source`, `datetime_update`. Binance is
+  registered with `source_id=3`.
+
+**Strategy — `prod_trade_strategy`**
+- `strategy` — catalog: `strategy_id` (PK), `strategy_name`, `description`,
+  `indicator_type`, `is_active`, `created_at`. Strategy `id=1`:
+  `strategy_rsi_daily_week`.
+- `strategy_rsi_daily_week` — versioned parameters for strategy 1:
+  `param_version` (PK), `is_active`, `rsi_period`, `weekly_rsi_trend_start`,
+  `weekly_rsi_trend_end`, `daily_rsi_oversold`, `daily_rsi_overbought`,
+  `created_at`, `notes`. Version 1 seeded with `14 / 40 / 70 / 30 / 70`.
+
+**Bronze — `prod_trade_bronze`**
+- `binance_btcusd_daily_raw` — daily BTC/USDT candles from Binance via CCXT.
+  PK `(symbol, candle_date)`; partitioned by `candle_date`; idempotent MERGE.
+  **(Implemented.)**
+- `coinapi_btcusd_daily_raw`, `investing_btcusd_daily_raw` — DDL ready; ingestion
+  pending.
+
+**Silver — `prod_trade_silver`**
+- `ohlcv_validated` — typed, de-duplicated OHLCV. One row per
+  `(symbol, temporality, time_period_start)`. Holds both `temporality='1d'` (daily
+  candle) and `temporality='1w'` (aggregated weekly candle). Partitioned by
+  `DATE(time_period_start)`, clustered by `symbol, temporality`.
+- `rsi_features` — RSI computed with **Wilder smoothing** and recursive state
+  (`var_p_recursive`, `var_n_recursive`). One row per
+  `(symbol, temporality, rsi_period, time_period_start)`. Covers `1d` and `1w`.
+  Enables bootstrap + incremental, idempotent updates. Reusable across strategies.
+
+**Gold — `prod_trade_gold`**
+- `fact_signals` — one row per `(symbol, temporality, signal_start, strategy_id)`:
+  `signal` (BUY/SELL/NEUTRAL), `trigger_params` (JSON with daily RSI, weekly RSI,
+  thresholds and trend state), `signal_created_at`. Partitioned by
+  `DATE(signal_start)`, clustered by `symbol, strategy_id`.
+
+---
+
+## Repository layout
+
+`dags/`, `ingest/` and `alerts/` live under `airflow/` because they run *inside*
+Airflow on the VM. `dataflow/` is kept separate because it is shipped to GCP.
+
+Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
+
+```
+.
+├── .gitignore                       # ✅ ignores venv, __pycache__, secrets, etc.
+├── README.md                        # ✅ this file
+├── airflow/                         # runs INSIDE Airflow on the VM
+│   ├── docker-compose.yaml          # ✅ Airflow stack (deployment placeholder)
+│   ├── dags/                        # 📁 daily DAG (pending)
+│   ├── ingest/
+│   │   ├── __init__.py              # ✅ re-exports ingest_daily_candles, fetch_daily_candles_range
+│   │   ├── binance_ingest.py        # ✅ Binance CCXT ingestion → bronze (single day or range/backfill)
+│   │   └── requirements.txt         # ✅ ingestion deps (ccxt, google-cloud-bigquery, tenacity)
+│   └── alerts/                      # 📁 Telegram client (pending)
+├── dataflow/                        # Beam pipeline (SHIPPED to GCP)
+│   ├── __init__.py                  # ✅
+│   ├── pipeline.py                  # ✅ entry point; orchestrates the 3 stages (--start_date/--end_date)
+│   ├── cleanup.py                   # ✅ deletes silver/gold by symbol/temporality/dates
+│   ├── stages/
+│   │   ├── conform.py               # ✅ Stage 1: bronze → ohlcv_validated (1d + 1w)
+│   │   ├── rsi.py                   # ✅ Stage 2: ohlcv_validated → rsi_features (recursive Wilder)
+│   │   └── signals.py               # ✅ Stage 3: rsi_features → fact_signals (per-week trend)
+│   └── requirements.txt             # ✅ Beam/Dataflow deps
+├── sql/
+│   └── DDL.sql                      # ✅ full medallion DDL + seeds
+├── terraform_infra/                 # 📁 Terraform IaC (BigQuery + VM, pending)
+├── github_actions/
+│   └── test/                        # 📁 pytest (pending)
+└── .github/
+    └── workflows/                   # 📁 GitHub Actions (pending)
+```
+
+---
+
+## Tech stack & design decisions
+
+Right-sizing is part of the point — every tool choice is justified below.
+
+- **Single asset (BTC), daily batch.** No intraday, no multi-asset. The schema is
+  designed to *scale* to more symbols/temporalities (via the `symbol` and
+  `temporality` columns), but the running pipeline is deliberately scoped.
+- **Airflow on an e2-micro VM, not Cloud Composer.** Composer keeps the environment
+  running 24/7 (~US$300–400/month even idle), disproportionate for a once-a-day
+  task. The e2-micro VM costs cents per month.
+- **Dataflow is kept despite tiny volume (kilobytes/day).** The goal is to
+  demonstrate Apache Beam. Cost is ~cents/month; the only real downside is worker
+  start-up latency (a few minutes).
+- **Airflow is the only trigger — no Pub/Sub, no standalone ingestion service.**
+  Ingestion lives in the repo and runs as a DAG task.
+- **Terraform is in scope (not optional).** Infra (BigQuery + VM) is defined as
+  code so the project is reproducible — a strong Data Engineer signal.
+- **Training is separated from inference.** The genetic algorithm that optimizes
+  the 4 RSI strategy parameters lives in the
+  `ag-determina-parametros-de-estrategia-rsi.ipynb` notebook (*offline training*),
+  **not** part of the daily pipeline. The daily job only applies already-fixed
+  parameters read from the strategy layer.
+- **Idempotency everywhere.** Re-running any task must not duplicate candles or
+  signals (`MERGE`/upsert in BigQuery; recursive RSI state for incremental updates).
+- **No secrets in the repo.** Telegram token / `chat_id` and the service account
+  are passed as secrets / environment variables, never committed.
+
+### IAM bootstrap (current trade-off)
+
+The service-account **role bindings are created with `gcloud` during the initial
+setup**, *not* in Terraform yet — a chicken-and-egg problem (Terraform needs the
+project, APIs and identity to exist before it can manage IAM). Migrating them to
+Terraform is **tracked technical debt**: use `google_project_iam_member` (additive,
+not authoritative) so Google-managed bindings are not wiped. Until then, IAM has two
+sources of truth — assumed and documented, not an oversight.
+
+---
+
+## Setup & deployment
+
+> Project: `trade-390514` · Region: `us-central1` ·
+> Service account: `trade-pipeline@trade-390514.iam.gserviceaccount.com`
+
+1. **GCP project & APIs.** Enable BigQuery, Dataflow, Compute Engine, Cloud Storage
+   (Dataflow staging/temp bucket), IAM and Cloud Resource Manager (the last two are
+   needed so Terraform can manage IAM and project-level resources).
+2. **Service account & IAM.** Create the service account and grant its role bindings
+   with `gcloud` (bootstrap step — see the IAM trade-off above).
+3. **BigQuery schema.** Run the idempotent DDL:
+   ```bash
+   bq query --use_legacy_sql=false --project_id=trade-390514 < sql/DDL.sql
+   ```
+4. **Infrastructure (Terraform).** Provision the BigQuery datasets and the e2-micro
+   VM from `terraform_infra/`:
+   ```bash
+   cd terraform_infra
+   terraform init && terraform plan && terraform apply
+   ```
+5. **Airflow on the VM.** Bring up Airflow with Docker Compose from `airflow/`, and
+   place the secrets (service account, Telegram token / `chat_id`) on the VM
+   securely.
+6. **Telegram bot.** Create the bot, obtain its token and `chat_id`, and store them
+   as secrets — never in the repo.
+
+---
+
+## Testing & CI
+
+- **pytest** in `github_actions/test/` covers the RSI logic (`compute_rsi_rows`),
+  the signal logic (`_compute_trend_state`, `_apply_signal`) and MERGE idempotency.
+- **GitHub Actions** in `.github/workflows/` runs lint + tests on every push.
+
+---
+
+## Roadmap
+
+- **Automatic re-calibration** with the genetic algorithm: a separate DAG that
+  updates the strategy parameters. Requires **walk-forward validation** to avoid
+  overfitting and look-ahead bias.
+- **Migrate the IAM role bindings** from `gcloud` to Terraform
+  (`google_project_iam_member`), leaving a single source of truth for IAM.
+- **CoinAPI and Investing.com ingestion** (bronze tables already defined in the DDL).
+
+---
+
+## Out of scope (for now)
+
+- The genetic-algorithm re-calibration (currently an offline notebook).
+- Dashboards / visualization.
+- Multiple assets or intraday frequencies (the silver/gold model already supports
+  `symbol` and `temporality` to grow in the future).
+
+---
+
+## License
+
+Add your preferred license here (e.g. MIT).

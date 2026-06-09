@@ -1,0 +1,2 @@
+apache-beam[gcp]==2.60.0
+google-cloud-bigquery==3.25.0
