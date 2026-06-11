@@ -210,7 +210,7 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def main(argv=None) -> None:
+def main(argv=None) -> None:  # pragma: no cover - CLI entry point (logging + I/O glue)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = _parse_args(argv)
     results = clean_tables(

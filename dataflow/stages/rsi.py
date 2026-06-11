@@ -13,8 +13,10 @@ Two execution modes, selected automatically:
   Bootstrap — rsi_features is empty for (symbol, temporality, rsi_period):
     All historical OHLCV rows are read, sorted by date, and the recursion
     *starts at zero* on the first candle (avg_gain = avg_loss = 0).  A row is
-    emitted from the very first candle; the zero seed decays geometrically, so
-    recent values converge to the standard RSI.
+    emitted from the very first candle, but the first ``rsi_period`` rows carry
+    ``rsi = NULL`` (Wilder warm-up: the zero-seeded averages have not converged
+    yet, so those values are not valid RSI). The recursive state is still
+    stored on every row, so the recursion is seamless once warm-up ends.
 
   Incremental — prior state exists in rsi_features:
     Only rows after the last computed date are read.  Each new candle continues
@@ -40,6 +42,7 @@ import apache_beam as beam
 from apache_beam.io.gcp.bigquery import ReadFromBigQuery, WriteToBigQuery
 from apache_beam.io.gcp import bigquery as beam_bq
 from apache_beam.options.pipeline_options import PipelineOptions
+from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
 logger = logging.getLogger(__name__)
@@ -114,9 +117,15 @@ WHEN NOT MATCHED THEN INSERT (
 # ---------------------------------------------------------------------------
 
 def _rsi_value(avg_gain: float, avg_loss: float) -> float:
-    # rs = 0 when avg_loss = 0, so the zero-seed first candle yields RSI 0
-    # (rather than the conventional 100). Scale is 0–100.
-    rs = 0.0 if avg_loss == 0.0 else avg_gain / avg_loss
+    # Standard RSI = 100·(1 − 1/(1+RS)) with RS = avg_gain/avg_loss; scale 0–100.
+    # Two boundary cases when avg_loss == 0 (no down-moves yet):
+    #   * avg_gain == 0  → the zero seed (no movement at all) → RSI 0.
+    #   * avg_gain  > 0  → a pure up-run → conventional RSI 100.
+    # Collapsing both to 0 would invert the scale for a strong uptrend and trip an
+    # oversold BUY at the top, so the two cases are kept distinct.
+    if avg_loss == 0.0:
+        return 0.0 if avg_gain == 0.0 else 100.0
+    rs = avg_gain / avg_loss
     return 100.0 * (1.0 - 1.0 / (1.0 + rs))
 
 
@@ -142,10 +151,13 @@ def compute_rsi_rows(
     ``time_period_start``.
 
     When ``prior_state`` is ``None`` (bootstrap), the recursion starts at zero
-    on the first candle and a row is emitted from that first candle onward.
-    When ``prior_state`` is provided (incremental), the recursion continues from
-    the stored (avg_gain, avg_loss) state for each new row. Both modes apply the
-    identical Wilder step, so they share one loop.
+    on the first candle and a row is emitted from that first candle onward —
+    but the first ``rsi_period`` rows are emitted with ``rsi = None`` (Wilder
+    warm-up: the averages have not converged), while still carrying the
+    recursive state. When ``prior_state`` is provided (incremental), the
+    recursion continues from the stored (avg_gain, avg_loss) state and every
+    row carries a value (the bootstrap is assumed to have covered the warm-up).
+    Both modes apply the identical Wilder step, so they share one loop.
 
     Returns a list of dicts matching ``rsi_features`` schema.
     """
@@ -156,7 +168,8 @@ def compute_rsi_rows(
     now_str = datetime.now(timezone.utc).isoformat()
     results: list[dict] = []
 
-    def _make_row(ts, close: float, avg_gain: float, avg_loss: float) -> dict:
+    def _make_row(ts, close: float, avg_gain: float, avg_loss: float,
+                  warm_up: bool) -> dict:
         return {
             "symbol":            symbol,
             "temporality":       temporality,
@@ -166,7 +179,9 @@ def compute_rsi_rows(
             "price_close":       close,
             "var_p_recursive":   avg_gain,
             "var_n_recursive":   avg_loss,
-            "rsi":               _rsi_value(avg_gain, avg_loss),
+            # Warm-up rows publish no RSI (the averages haven't converged) but
+            # still persist the recursive state for the rows that follow.
+            "rsi":               None if warm_up else _rsi_value(avg_gain, avg_loss),
         }
 
     if prior_state is None:
@@ -174,7 +189,8 @@ def compute_rsi_rows(
         avg_gain, avg_loss = 0.0, 0.0
         prev_close = rows[0]["price_close"]
         results.append(_make_row(
-            rows[0]["time_period_start"], rows[0]["price_close"], avg_gain, avg_loss
+            rows[0]["time_period_start"], rows[0]["price_close"], avg_gain, avg_loss,
+            warm_up=True,
         ))
         start_idx = 1
     else:
@@ -192,7 +208,12 @@ def compute_rsi_rows(
         delta    = close - prev_close
         avg_gain = (avg_gain * (rsi_period - 1) + max(delta, 0.0)) / rsi_period
         avg_loss = (avg_loss * (rsi_period - 1) + max(-delta, 0.0)) / rsi_period
-        results.append(_make_row(rows[i]["time_period_start"], close, avg_gain, avg_loss))
+        # In bootstrap mode `i` is the series index (the seed was index 0), so
+        # the first `rsi_period` rows are warm-up. Incremental rows always carry
+        # a value: the bootstrap covered the warm-up.
+        warm_up = prior_state is None and i < rsi_period
+        results.append(_make_row(rows[i]["time_period_start"], close, avg_gain, avg_loss,
+                                 warm_up=warm_up))
         prev_close = close
 
     return results
@@ -202,7 +223,22 @@ def compute_rsi_rows(
 # Beam stage
 # ---------------------------------------------------------------------------
 
-def _fetch_last_rsi_state(
+def _truncate_staging(bq: bigquery.Client, project: str) -> None:  # pragma: no cover - requires live BigQuery
+    """Guarantee an empty staging table before the Beam write.
+
+    With FILE_LOADS, WRITE_TRUNCATE only takes effect when at least one record
+    triggers a load job. A zero-row run (e.g. an incremental read with no new
+    candles) leaves the previous staging contents in place, and the
+    unconditional MERGE would replay them — resurrecting rows a cleanup just
+    deleted. Truncating up front closes that gap.
+    """
+    try:
+        bq.query(f"TRUNCATE TABLE `{project}.{_STAGING}`").result()
+    except NotFound:
+        pass  # first run: staging not created yet (CREATE_IF_NEEDED will make it)
+
+
+def _fetch_last_rsi_state(  # pragma: no cover - requires live BigQuery
     bq: bigquery.Client,
     project: str,
     symbol: str,
@@ -225,7 +261,7 @@ def _fetch_last_rsi_state(
     return row
 
 
-def run_rsi(config: dict) -> None:
+def run_rsi(config: dict) -> None:  # pragma: no cover - Beam/Dataflow + BigQuery
     """Run Stage 2: ohlcv_validated → rsi_features."""
     project      = config.get("project", _PROJECT)
     symbol       = config.get("symbol", "BTCUSD")
@@ -257,6 +293,8 @@ def run_rsi(config: dict) -> None:
         project=project,
         region=config.get("region", "us-central1"),
     )
+
+    _truncate_staging(bq, project)
 
     with beam.Pipeline(options=options) as p:
         (

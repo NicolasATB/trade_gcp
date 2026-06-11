@@ -1,10 +1,13 @@
 """
 Stage 1 — bronze → silver (ohlcv_validated).
 
-Reads Binance candles from ``prod_trade_bronze.binance_btcusd_daily_raw``
-for the ``[start_date, end_date]`` range, normalises fields to the canonical
-OHLCV schema, writes to a staging table, and merges into
-``prod_trade_silver.ohlcv_validated``.
+Reads daily candles from every bronze candle table (Bitstamp for the
+pre-Binance history up to 2017-08-16, Binance from 2017-08-17 onward) for the
+``[start_date, end_date]`` range, consolidates them by source priority
+(business rule: the source with the **highest** ``priority`` in
+``prod_trade_control.source_priority`` wins when more than one source covers
+the same date), normalises fields to the canonical OHLCV schema, writes to a
+staging table, and merges into ``prod_trade_silver.ohlcv_validated``.
 
 Idempotency: the staging table is truncated before the Beam write; the
 final MERGE upserts on the natural key (symbol, temporality,
@@ -25,12 +28,19 @@ import apache_beam as beam
 from apache_beam.io.gcp.bigquery import ReadFromBigQuery, WriteToBigQuery
 from apache_beam.io.gcp import bigquery as beam_bq
 from apache_beam.options.pipeline_options import PipelineOptions
+from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
 logger = logging.getLogger(__name__)
 
 _PROJECT = "trade-390514"
-_BRONZE_TABLE = "prod_trade_bronze.binance_btcusd_daily_raw"
+# Every bronze candle table that feeds the canonical OHLCV. All share the same
+# shape (symbol, candle_date, OHLCV, source_id); add new sources here.
+_BRONZE_TABLES = [
+    "prod_trade_bronze.bitstamp_btcusd_daily_raw",  # pre-Binance history (≤ 2017-08-16)
+    "prod_trade_bronze.binance_btcusd_daily_raw",   # 2017-08-17 onward
+]
+_SOURCE_PRIORITY_TABLE = "prod_trade_control.source_priority"
 _STAGING = "prod_trade_silver.ohlcv_validated_staging"
 _TARGET = "prod_trade_silver.ohlcv_validated"
 
@@ -53,12 +63,52 @@ _STAGING_SCHEMA = {
     ]
 }
 
+# One UNION ALL branch per bronze table; each branch prunes its own
+# candle_date partition.
+_READ_BRONZE_BRANCH = """  SELECT symbol, candle_date, price_open, price_high, price_low,
+         price_close, volume_traded, source_id
+  FROM `{project}.{table}`
+  WHERE candle_date BETWEEN '{start_date}' AND '{end_date}'"""
+
+# Multi-source consolidation: business rule — the source with the HIGHEST
+# `priority` in source_priority wins when several sources cover the same date
+# (today Bitstamp ≤ 2017-08-16 and Binance ≥ 2017-08-17 are date-disjoint, so
+# the tie-break is a safety net). Deduplication is per candle_date, not per raw
+# symbol: raw symbols differ by exchange (BTC/USD vs BTC/USDT) but every source
+# normalises to the same canonical BTCUSD downstream, so two sources on one
+# date would otherwise collide in the silver MERGE. Unregistered sources
+# (priority NULL) sort last (BigQuery DESC puts NULLs last).
 _READ_QUERY = """
+WITH bronze AS (
+{union_sql}
+)
 SELECT symbol, candle_date, price_open, price_high, price_low,
        price_close, volume_traded, source_id
-FROM `{project}.{table}`
-WHERE candle_date BETWEEN '{start_date}' AND '{end_date}'
+FROM (
+  SELECT b.*, ROW_NUMBER() OVER (
+           PARTITION BY b.candle_date
+           ORDER BY p.priority DESC
+         ) AS rn
+  FROM bronze AS b
+  LEFT JOIN `{project}.{priority_table}` AS p USING (source_id)
+)
+WHERE rn = 1
 """
+
+
+def _build_read_query(project: str, start_date, end_date) -> str:
+    """Render the multi-source bronze read for ``[start_date, end_date]``."""
+    union_sql = "\n  UNION ALL\n".join(
+        _READ_BRONZE_BRANCH.format(
+            project=project, table=table,
+            start_date=start_date.isoformat(), end_date=end_date.isoformat(),
+        )
+        for table in _BRONZE_TABLES
+    )
+    return _READ_QUERY.format(
+        union_sql=union_sql, project=project,
+        priority_table=_SOURCE_PRIORITY_TABLE,
+    )
 
 # MERGE from staging → target on the natural key.
 _MERGE_SQL = """
@@ -116,10 +166,10 @@ USING (
     SUM(volume_traded) AS volume_traded,
     CAST(NULL AS INT64) AS trades_count
   FROM (
-    SELECT *, DATE_TRUNC(DATE(time_period_start), WEEK) AS week_start
+    SELECT *, DATE_TRUNC(DATE(time_period_start), WEEK(MONDAY)) AS week_start
     FROM `{project}.{target}`
     WHERE temporality = '1d'
-      AND DATE(time_period_start) >= DATE_TRUNC(DATE '{start_date}', WEEK)
+      AND DATE(time_period_start) >= DATE_TRUNC(DATE '{start_date}', WEEK(MONDAY))
   )
   GROUP BY symbol, week_start
 ) AS S
@@ -149,7 +199,21 @@ WHEN NOT MATCHED THEN INSERT (
 """
 
 
-def _aggregate_weekly(bq: bigquery.Client, project: str, start_date) -> None:
+def _truncate_staging(bq: bigquery.Client, project: str) -> None:  # pragma: no cover - requires live BigQuery
+    """Guarantee an empty staging table before the Beam write.
+
+    With FILE_LOADS, WRITE_TRUNCATE only takes effect when at least one record
+    triggers a load job. A zero-row run (e.g. a date range with no bronze rows)
+    leaves the previous staging contents in place, and the unconditional MERGE
+    would replay them. Truncating up front closes that gap.
+    """
+    try:
+        bq.query(f"TRUNCATE TABLE `{project}.{_STAGING}`").result()
+    except NotFound:
+        pass  # first run: staging not created yet (CREATE_IF_NEEDED will make it)
+
+
+def _aggregate_weekly(bq: bigquery.Client, project: str, start_date) -> None:  # pragma: no cover - requires live BigQuery
     # Recompute every week from the range's first week onward, keeping weekly
     # candles consistent with the daily candles just merged.
     bq.query(
@@ -159,7 +223,7 @@ def _aggregate_weekly(bq: bigquery.Client, project: str, start_date) -> None:
     ).result()
 
 
-def _ts_str(ts) -> str:
+def _ts_str(ts) -> str:  # pragma: no cover - unused helper kept for symmetry with other stages
     """Convert a datetime or date-like value to an ISO timestamp string."""
     if isinstance(ts, str):
         return ts
@@ -202,7 +266,7 @@ class _NormaliseBinanceRow(beam.DoFn):
         }
 
 
-def run_conform(config: dict) -> None:
+def run_conform(config: dict) -> None:  # pragma: no cover - Beam/Dataflow + BigQuery
     """Run Stage 1: bronze → ohlcv_validated for ``[start_date, end_date]``."""
     project      = config.get("project", _PROJECT)
     start_date   = config["start_date"]
@@ -215,10 +279,10 @@ def run_conform(config: dict) -> None:
         region=config.get("region", "us-central1"),
     )
 
-    read_query = _READ_QUERY.format(
-        project=project, table=_BRONZE_TABLE,
-        start_date=start_date.isoformat(), end_date=end_date.isoformat(),
-    )
+    read_query = _build_read_query(project, start_date, end_date)
+
+    bq = bigquery.Client(project=project)
+    _truncate_staging(bq, project)
 
     with beam.Pipeline(options=options) as p:
         (
@@ -238,15 +302,14 @@ def run_conform(config: dict) -> None:
             )
         )
 
-    bq = bigquery.Client(project=project)
     bq.query(
         _MERGE_SQL.format(project=project, target=_TARGET, staging=_STAGING)
     ).result()
     logger.info("Daily candles merged into ohlcv_validated for %s..%s", start_date, end_date)
 
     # Aggregate daily candles to weekly and upsert every week touched by the
-    # range (from the start week onward). Weeks are identified by their starting
-    # Sunday (BigQuery's WEEK default), so partially-filled weeks stay up to date
-    # as new daily candles arrive.
+    # range (from the start week onward). Business rule: weeks run Monday→Sunday
+    # (BigQuery WEEK(MONDAY)), so time_period_start is the week's Monday and
+    # partially-filled weeks stay up to date as new daily candles arrive.
     _aggregate_weekly(bq, project, start_date)
     logger.info("Stage 1 complete: weekly ohlcv_validated updated from week of %s", start_date)
