@@ -1,0 +1,55 @@
+# Test + coverage configuration (T-15). Packaging of the `dataflow` package for
+# DataflowRunner stays in setup.py (--setup_file ./setup.py); this file only
+# configures the developer/CI tooling, so it intentionally declares no
+# [build-system] table.
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Make the repo root importable so tests can `import dataflow...` without an
+# editable install (the stage modules live in ./dataflow).
+pythonpath = ["."]
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--cov=dataflow",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-fail-under=85",
+    # Integration tests hit live BigQuery: deselected by default so the unit
+    # suite stays fast and CI-safe. Run them with: pytest -m integration --no-cov
+    # (a CLI -m overrides this one; --no-cov because only unit tests feed the
+    # coverage gate).
+    "-m", "not integration",
+]
+markers = [
+    "integration: validates the live BigQuery tables (read-only) plus an opt-in pipeline replay; skipped without GCP creds, deselected by default.",
+]
+# All silenced warnings come from third-party deps, not our code, so they are
+# scoped per-module to keep CI logs clean without hiding our own deprecations.
+filterwarnings = [
+    # protobuf (via google-cloud-bigquery): only matters if we migrate to Python
+    # 3.14 (we are on 3.12.10). Informational until then; resolved by bumping
+    # google-cloud-bigquery / protobuf when the time comes.
+    "ignore:Type google._upb._message:DeprecationWarning",
+    # pyparsing / httplib2: purely cosmetic (an old transitive dep of Beam).
+    "ignore::DeprecationWarning:httplib2.auth",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["dataflow"]
+# pipeline.py is the CLI/Beam orchestration entry point: pure glue that wires the
+# three stages and can only run against live GCP, so it is excluded from the
+# unit-test coverage target (covered by the manual end-to-end run in T-08).
+omit = ["dataflow/pipeline.py"]
+
+[tool.coverage.report]
+show_missing = true
+# The Beam I/O and BigQuery-client functions are marked `# pragma: no cover` in
+# the source because they require live GCP; only the pure logic is unit-tested.
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

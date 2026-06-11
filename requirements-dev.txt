@@ -1,0 +1,7 @@
+# Test / CI dependencies (T-15 / T-16). Install alongside the runtime deps:
+#   pip install -r dataflow/requirements.txt -r requirements-dev.txt
+# Runtime deps are needed because the stage modules import apache_beam and
+# google.cloud.bigquery at import time, even for the pure logic under test.
+pytest>=8.0
+pytest-cov>=5.0
+pytest-mock>=3.14

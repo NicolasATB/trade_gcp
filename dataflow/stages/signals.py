@@ -40,6 +40,7 @@ import apache_beam as beam
 from apache_beam.io.gcp.bigquery import ReadFromBigQuery, WriteToBigQuery
 from apache_beam.io.gcp import bigquery as beam_bq
 from apache_beam.options.pipeline_options import PipelineOptions
+from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
 logger = logging.getLogger(__name__)
@@ -63,19 +64,24 @@ _STAGING_SCHEMA = {
 }
 
 # Read all weekly RSI history for a symbol (needed for stateful trend walk-forward).
+# Warm-up rows (rsi IS NULL, the first rsi_period candles of a bootstrap) carry
+# no valid RSI and are excluded.
 _READ_WEEKLY_RSI = """
 SELECT time_period_start, rsi
 FROM `{project}.{table}`
 WHERE symbol = '{symbol}' AND temporality = '1w' AND rsi_period = {rsi_period}
+  AND rsi IS NOT NULL
 ORDER BY time_period_start
 """
 
-# Read the daily RSI rows for the target date range (inclusive).
+# Read the daily RSI rows for the target date range (inclusive). Warm-up rows
+# (rsi IS NULL) produce no signal.
 _READ_DAILY_RSI = """
 SELECT time_period_start, rsi
 FROM `{project}.{table}`
 WHERE symbol = '{symbol}' AND temporality = '1d' AND rsi_period = {rsi_period}
   AND DATE(time_period_start) BETWEEN '{start_date}' AND '{end_date}'
+  AND rsi IS NOT NULL
 ORDER BY time_period_start
 """
 
@@ -114,8 +120,11 @@ WHEN NOT MATCHED THEN INSERT (
 # ---------------------------------------------------------------------------
 
 def _week_start(d: date) -> date:
-    """Sunday-based week start, matching BigQuery ``DATE_TRUNC(d, WEEK)``."""
-    return d - timedelta(days=(d.weekday() + 1) % 7)
+    """Monday-based week start, matching BigQuery ``DATE_TRUNC(d, WEEK(MONDAY))``.
+
+    Business rule: weeks run Monday→Sunday, so the weekly candle's
+    ``time_period_start`` is the Monday that opens the week."""
+    return d - timedelta(days=d.weekday())
 
 
 def _as_date(ts: Any) -> date:
@@ -264,7 +273,21 @@ class _ComputeSignalFn(beam.DoFn):
 # Stage entry point
 # ---------------------------------------------------------------------------
 
-def _fetch_active_params(bq: bigquery.Client, project: str) -> dict:
+def _truncate_staging(bq: bigquery.Client, project: str) -> None:  # pragma: no cover - requires live BigQuery
+    """Guarantee an empty staging table before the Beam write.
+
+    With FILE_LOADS, WRITE_TRUNCATE only takes effect when at least one record
+    triggers a load job. A zero-row run (e.g. a date range with no daily RSI
+    rows) leaves the previous staging contents in place, and the unconditional
+    MERGE would replay them. Truncating up front closes that gap.
+    """
+    try:
+        bq.query(f"TRUNCATE TABLE `{project}.{_STAGING}`").result()
+    except NotFound:
+        pass  # first run: staging not created yet (CREATE_IF_NEEDED will make it)
+
+
+def _fetch_active_params(bq: bigquery.Client, project: str) -> dict:  # pragma: no cover - requires live BigQuery
     query = _READ_ACTIVE_PARAMS.format(project=project, table=_PARAMS_TABLE)
     rows = list(bq.query(query).result())
     if not rows:
@@ -280,7 +303,7 @@ def _fetch_active_params(bq: bigquery.Client, project: str) -> dict:
     return row
 
 
-def _fetch_weekly_rsi_history(
+def _fetch_weekly_rsi_history(  # pragma: no cover - requires live BigQuery
     bq: bigquery.Client, project: str, symbol: str, rsi_period: int
 ) -> list[dict]:
     query = _READ_WEEKLY_RSI.format(
@@ -292,7 +315,7 @@ def _fetch_weekly_rsi_history(
             for r in rows]
 
 
-def run_signals(config: dict) -> None:
+def run_signals(config: dict) -> None:  # pragma: no cover - Beam/Dataflow + BigQuery
     """Run Stage 3: rsi_features → fact_signals for ``[start_date, end_date]``."""
     project      = config.get("project", _PROJECT)
     symbol       = config.get("symbol", "BTCUSD")
@@ -329,6 +352,8 @@ def run_signals(config: dict) -> None:
         project=project,
         region=config.get("region", "us-central1"),
     )
+
+    _truncate_staging(bq, project)
 
     with beam.Pipeline(options=options) as p:
         (

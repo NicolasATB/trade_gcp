@@ -82,6 +82,10 @@ def fetch_daily_candles_range(
     volume]``, sorted by ascending open time. The range is bounded with CCXT's
     unified ``since`` (start) and ``params['until']`` (end), and
     ``params['paginate']`` lets CCXT walk Binance's 1000-candle pages for us.
+    With transparent pagination, ``limit`` is the TOTAL number of candles
+    requested (not the per-page size), so it must cover the whole range —
+    passing a constant 1000 would silently truncate back-fills longer than
+    1000 days at the first page.
     Candles whose day has not fully closed yet (open time within the last 24 h)
     are dropped, mirroring the "closed candle only" rule of ``fetch_daily_candle``.
 
@@ -101,11 +105,13 @@ def fetch_daily_candles_range(
     # A daily candle for day D is closed once D+1 has started.
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
+    total_days = (end_date - start_date).days + 1
+
     candles = exchange.fetch_ohlcv(
         symbol,
         timeframe=TIMEFRAME,
         since=since,
-        limit=1000,
+        limit=total_days,
         params={"until": until, "paginate": True},
     )
 

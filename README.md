@@ -79,16 +79,27 @@ and the job executes on managed GCP workers.
    `prod_trade_bronze.binance_btcusd_daily_raw` (idempotent MERGE on
    `symbol + candle_date`).
 3. **Conform to silver — Dataflow (`stages/conform.py`):**
-   - Reads the daily candle from bronze, normalizes fields and writes to
-     `prod_trade_silver.ohlcv_validated` (`temporality='1d'`).
+   - Reads the daily candles from **every bronze candle table** (Bitstamp for
+     the pre-Binance history, Binance from 2017-08-17 onward) and consolidates
+     them. **Business rule:** when more than one source covers the same date,
+     the source with the **highest `priority`** in
+     `prod_trade_control.source_priority` wins (today the sources are
+     date-disjoint, so the tie-break is a safety net). Then normalizes fields
+     and writes to `prod_trade_silver.ohlcv_validated` (`temporality='1d'`).
    - Aggregates the current week's daily candles into a weekly candle and MERGEs
      it into `ohlcv_validated` (`temporality='1w'`), keeping the weekly RSI fresh
-     every day.
+     every day. **Business rule:** weeks run **Monday → Sunday** (BigQuery
+     `WEEK(MONDAY)`); the weekly candle's `time_period_start` is the Monday that
+     opens the week, and its `price_close` is the close of the week's last
+     available day (Sunday once the week is complete).
 4. **RSI to silver — Dataflow (`stages/rsi.py`):** computes RSI with **Wilder
    smoothing** (recursive state: `var_p_recursive`, `var_n_recursive`) for **two
    temporalities**: `1d` (daily) and `1w` (weekly). Writes to
    `prod_trade_silver.rsi_features`. Full bootstrap on the first run; incremental
-   update on every subsequent run.
+   update on every subsequent run. **Business rule:** the first `rsi_period` rows
+   of a bootstrap are **warm-up** — they store the recursive state but publish
+   `rsi = NULL` (the zero-seeded averages haven't converged yet); the signals
+   stage skips NULL-RSI rows.
 5. **Signal to gold — Dataflow (`stages/signals.py`):** reads the active
    parameters from `prod_trade_strategy.strategy_rsi_daily_week`, runs a
    walk-forward over the weekly-RSI history to derive a **per-week** trend state,
@@ -157,17 +168,23 @@ documentation and optimizer hints only).
   `created_at`, `notes`. Version 1 seeded with `14 / 40 / 70 / 30 / 70`.
 
 **Bronze — `prod_trade_bronze`**
-- `binance_btcusd_daily_raw` — daily BTC/USDT candles from Binance via CCXT.
-  PK `(symbol, candle_date)`; partitioned by `candle_date`; idempotent MERGE.
-  **(Implemented.)**
+- `binance_btcusd_daily_raw` — daily BTC/USDT candles from Binance via CCXT
+  (since 2017-08-17, the pair's listing date). PK `(symbol, candle_date)`;
+  partitioned by `candle_date`; idempotent MERGE. **(Implemented.)**
+- `bitstamp_btcusd_daily_raw` — daily BTC/USD candles from Bitstamp via CCXT,
+  the **pre-Binance history** (2011-08-18 → 2017-08-16; date cut-over, no
+  overlap). Same schema and pattern as the Binance table; reuses the same
+  ingest module switched by environment variables. Source `priority 4`
+  (> Binance) in `source_priority`. **(Implemented.)**
 - `coinapi_btcusd_daily_raw`, `investing_btcusd_daily_raw` — DDL ready; ingestion
   pending.
 
 **Silver — `prod_trade_silver`**
 - `ohlcv_validated` — typed, de-duplicated OHLCV. One row per
   `(symbol, temporality, time_period_start)`. Holds both `temporality='1d'` (daily
-  candle) and `temporality='1w'` (aggregated weekly candle). Partitioned by
-  `DATE(time_period_start)`, clustered by `symbol, temporality`.
+  candle) and `temporality='1w'` (aggregated weekly candle, Monday → Sunday,
+  labelled by its Monday). Partitioned by `DATE(time_period_start)`, clustered by
+  `symbol, temporality`.
 - `rsi_features` — RSI computed with **Wilder smoothing** and recursive state
   (`var_p_recursive`, `var_n_recursive`). One row per
   `(symbol, temporality, rsi_period, time_period_start)`. Covers `1d` and `1w`.
@@ -211,9 +228,17 @@ Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
 │   └── requirements.txt             # ✅ Beam/Dataflow deps
 ├── sql/
 │   └── DDL.sql                      # ✅ full medallion DDL + seeds
+├── tests/                           # ✅ pytest unit tests for the pure logic
+│   ├── conftest.py                  # ✅ shared fixtures (OHLCV / weekly-RSI builders, strategy params)
+│   ├── test_rsi.py                  # ✅ Wilder RSI + bootstrap/incremental continuity
+│   ├── test_signals.py              # ✅ trend walk-forward + BUY/SELL/NEUTRAL + DoFn
+│   ├── test_conform.py              # ✅ bronze→silver row normalisation
+│   ├── test_cleanup.py              # ✅ filter/clause/target helpers + clean_tables
+│   ├── test_sql_contracts.py        # ✅ SQL-template guards (WEEK(MONDAY), OHLC rules, MERGE keys)
+│   └── test_integration_bq.py       # ✅ live-BQ validations + opt-in pipeline replay (-m integration)
+├── pyproject.toml                   # ✅ pytest + coverage config
+├── requirements-dev.txt             # ✅ test/CI deps (pytest, pytest-cov, pytest-mock)
 ├── terraform_infra/                 # 📁 Terraform IaC (BigQuery + VM, pending)
-├── github_actions/
-│   └── test/                        # 📁 pytest (pending)
 └── .github/
     └── workflows/                   # 📁 GitHub Actions (pending)
 ```
@@ -243,7 +268,11 @@ Right-sizing is part of the point — every tool choice is justified below.
   **not** part of the daily pipeline. The daily job only applies already-fixed
   parameters read from the strategy layer.
 - **Idempotency everywhere.** Re-running any task must not duplicate candles or
-  signals (`MERGE`/upsert in BigQuery; recursive RSI state for incremental updates).
+  signals: each stage explicitly truncates its staging table (`TRUNCATE TABLE`
+  before the Beam pipeline — with `FILE_LOADS`, Beam's `WRITE_TRUNCATE` only
+  applies when ≥1 row is written), Beam writes to staging, then a SQL `MERGE`
+  upserts into the target on the natural key; `rsi_features` keeps recursive
+  state for incremental updates.
 - **No secrets in the repo.** Telegram token / `chat_id` and the service account
   are passed as secrets / environment variables, never committed.
 
@@ -288,9 +317,42 @@ sources of truth — assumed and documented, not an oversight.
 
 ## Testing & CI
 
-- **pytest** in `github_actions/test/` covers the RSI logic (`compute_rsi_rows`),
-  the signal logic (`_compute_trend_state`, `_apply_signal`) and MERGE idempotency.
-- **GitHub Actions** in `.github/workflows/` runs lint + tests on every push.
+- **pytest** in `tests/` covers the *pure* pipeline logic — no GCP needed: the
+  Wilder RSI (`compute_rsi_rows`, `_rsi_value`), the strategy (`_compute_trend_states`,
+  `_apply_signal`, `_week_start`, `_ComputeSignalFn`), the bronze→silver
+  normalisation (`_NormaliseBinanceRow`), the cleanup helpers, and **SQL-template
+  contracts** (`test_sql_contracts.py`): Monday-based weeks (`WEEK(MONDAY)`,
+  never a bare `WEEK`), weekly OHLC rules (open = first day, close = last day),
+  and the natural key of every MERGE. Beam/BigQuery I/O
+  functions are marked `# pragma: no cover` (they require live GCP) so coverage
+  reflects the testable logic. Coverage gate: **≥ 85 %** (configured in
+  `pyproject.toml`).
+- **Idempotency is covered at the logic level:** a continuity test asserts that the
+  incremental RSI update reproduces exactly what a full bootstrap would
+  (`test_incremental_matches_full_bootstrap`), guarding the no-duplicate-history
+  guarantee that the BigQuery `MERGE` relies on.
+- **Run locally:**
+  ```bash
+  pip install -r dataflow/requirements.txt -r requirements-dev.txt
+  pytest
+  ```
+- **Integration tests** (`test_integration_bq.py`, marker `integration`): read-only
+  validations against the live BigQuery tables — Monday-labelled weeks, weekly OHLC
+  = aggregation of its dailies, Wilder warm-up NULLs in the exact first `rsi_period`
+  rows, natural-key uniqueness in all four tables, canonical signal values and
+  queryable `trigger_params` JSON. The RSI ∈ [0, 100] bound is checked over the
+  real Binance-ingested history (the agreed substitute for Hypothesis
+  property-based testing). Deselected by default and skipped without GCP
+  credentials; run them with:
+  ```bash
+  pytest -m integration --no-cov
+  ```
+  An opt-in end-to-end replay (`test_pipeline_replay_is_idempotent`) re-runs the
+  full pipeline twice over the latest bronze day and asserts stable counts — the
+  manual T-08 check. It requires `TRADE_GCP_TEMP_LOCATION=gs://...` (slow, incurs
+  GCP cost).
+- **GitHub Actions** in `.github/workflows/` will run lint + tests on every push
+  (T-16, pending). CI runs the unit suite only (integration stays deselected).
 
 ---
 

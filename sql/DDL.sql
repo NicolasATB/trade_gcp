@@ -141,6 +141,40 @@ ON T.source_id = S.source_id
 WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
 VALUES (3, 'Binance (CCXT)', 3, TRUE, 'https://api.binance.com', 'Binance', CURRENT_TIMESTAMP());
 
+-- Bitstamp candles ingested via CCXT (same ingest module as Binance, switched
+-- by env vars). Extends BTC history before Binance's BTC/USDT listing
+-- (2017-08-17): Bitstamp trades BTC/USD continuously since ~2011-08. Same
+-- shape and upsert pattern as the Binance table: partitioned by the candle's
+-- own date, idempotent MERGE on (symbol, candle_date). Cut-over policy:
+-- Bitstamp rows are loaded only up to 2017-08-16; Binance covers 2017-08-17
+-- onward, so the two sources never overlap by date.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.bitstamp_btcusd_daily_raw` (
+  symbol          STRING    NOT NULL OPTIONS(description = "CCXT unified symbol as requested (e.g. BTC/USD)."),
+  candle_date     DATE      NOT NULL OPTIONS(description = "Candle open date (UTC), derived from open_time. Business key and partition column."),
+  open_time       INT64     NOT NULL OPTIONS(description = "Candle open time in epoch milliseconds, as delivered by CCXT/Bitstamp (raw)."),
+  price_open      FLOAT64   OPTIONS(description = "Open price."),
+  price_high      FLOAT64   OPTIONS(description = "High price."),
+  price_low       FLOAT64   OPTIONS(description = "Low price."),
+  price_close     FLOAT64   OPTIONS(description = "Close price."),
+  volume_traded   FLOAT64   OPTIONS(description = "Base-asset traded volume."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (symbol, candle_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY candle_date
+CLUSTER BY symbol
+OPTIONS(description = "Raw daily BTC candles from Bitstamp via CCXT (pre-Binance history, up to 2017-08-16). Idempotent upsert on (symbol, candle_date).");
+
+-- Register Bitstamp as a source. Idempotent seed. Priority 4: preferred over
+-- Binance (3) on consolidation ties (moot in practice — the date cut-over
+-- keeps the two sources disjoint).
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 4 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (4, 'Bitstamp (CCXT)', 4, TRUE, 'https://www.bitstamp.net/api/', 'Bitstamp', CURRENT_TIMESTAMP());
+
 
 -- ---------------------------------------------------------------------
 -- prod_trade_silver (Option B: symbol and temporality as columns)
