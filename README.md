@@ -74,7 +74,7 @@ and the job executes on managed GCP workers.
 ## Daily data flow
 
 1. **Airflow scheduler** (on the VM) fires the DAG according to its daily cron.
-2. **Ingest — `PythonOperator`:** runs `airflow/ingest/binance_ingest.py`,
+2. **Ingest — `PythonOperator`:** runs `airflow/ingest/binance_btc_ingest.py`,
    downloads the daily BTC/USDT candle from Binance via CCXT and writes it to
    `prod_trade_bronze.binance_btcusd_daily_raw` (idempotent MERGE on
    `symbol + candle_date`).
@@ -173,9 +173,43 @@ documentation and optimizer hints only).
   partitioned by `candle_date`; idempotent MERGE. **(Implemented.)**
 - `bitstamp_btcusd_daily_raw` — daily BTC/USD candles from Bitstamp via CCXT,
   the **pre-Binance history** (2011-08-18 → 2017-08-16; date cut-over, no
-  overlap). Same schema and pattern as the Binance table; reuses the same
-  ingest module switched by environment variables. Source `priority 4`
-  (> Binance) in `source_priority`. **(Implemented.)**
+  overlap). Same schema and pattern as the Binance table; its entry-point
+  `bitstamp_btc_ingest.py` shares the `ccxt_candle_common.py` logic. Source
+  `priority 4` (> Binance) in `source_priority`. **(Implemented.)**
+- `bitcoin_data_mvrv_zscore_daily_raw` — daily BTC MVRV Z-Score from
+  bitcoin-data.com (BGeometrics). **Not a candle**: a daily metric (one value
+  per date) that **does not feed `conform`'s OHLCV consolidation**. PK
+  `mvrvz_date`; partitioned by `mvrvz_date`; idempotent MERGE. Full history
+  (from 2009-01-03) loaded once from the **CSV export** (`/v1/mvrv-zscore/csv`)
+  and refreshed daily from the **API** (`/v1/mvrv-zscore/last`). Source
+  `priority NULL` (never competes in `conform`). The daily process **never
+  fabricates a value**: a missing datum is **alerted and skipped**; the
+  back-fill applies **one-off historical corrections**. **(Implemented.)**
+- **Macro feature series (non-candle)** — four macroeconomic context series for
+  model training. Like MVRV, they are **not candles and do not feed `conform`**:
+  one value per date each, its own bronze table, partitioned by its date
+  (**monthly** for the long series —DXY/10Y/Fed funds—: their daily history
+  exceeds the 10000-partitions-per-table cap; M2 weekly and MVRV stay daily),
+  idempotent MERGE, `priority NULL`. Full history loaded once (`--backfill`) and
+  refreshed daily. The process **never fabricates a value**: if the source
+  delivers a gap, it **alerts and skips**.
+  - `yahoo_dxy_daily_raw` — **DXY** (ICE U.S. Dollar Index, 6-currency) from
+    Yahoo Finance (`DX-Y.NYB`), daily OHLC since **1971**. PK/partition
+    `dxy_date`. Stores only **closed** bars (drops the in-progress current-UTC
+    day). Source `source_id=6`. **(Implemented.)**
+  - `fred_wm2ns_weekly_raw` — **M2** (money stock, WM2NS, weekly NSA) from
+    FRED/**ALFRED** with **point-in-time fidelity**: M2 is revised and published
+    with a lag, so **every vintage** is stored. Natural key
+    `(wm2ns_date, realtime_start)`; partitioned by `wm2ns_date`. To reconstruct
+    what was known on day `X` without look-ahead, take the row with
+    `realtime_start ≤ X ≤ realtime_end` (`realtime_end = 9999-12-31` while it is
+    the latest revision). Source `source_id=7`. **(Implemented.)**
+  - `fred_dgs10_daily_raw` — **10Y Treasury** (DGS10, daily yield, %) from FRED,
+    since **1962**. Not revised: plain `(obs_date, obs_value)` series. Source
+    `source_id=8`. **(Implemented.)**
+  - `fred_dff_daily_raw` — **Fed funds** (DFF, daily effective rate, %) from
+    FRED, since **1954**. Same plain shape as DGS10 (both share the
+    `fred_common.py` logic via thin entry-points). Source `source_id=9`. **(Implemented.)**
 - `coinapi_btcusd_daily_raw`, `investing_btcusd_daily_raw` — DDL ready; ingestion
   pending.
 
@@ -195,6 +229,21 @@ documentation and optimizer hints only).
   `signal` (BUY/SELL/NEUTRAL), `trigger_params` (JSON with daily RSI, weekly RSI,
   thresholds and trend state), `signal_created_at`. Partitioned by
   `DATE(signal_start)`, clustered by `symbol, strategy_id`.
+- **Training views** (read-only, line up close + RSI + MVRV for model training;
+  close and RSI already co-live in `rsi_features`, only MVRV is joined in):
+  - **MVRV 1-day lag:** the source publishes day `D-1`'s value under
+    `mvrvz_date = D` (the 2026-06-10 row is really 2026-06-09), so the join
+    shifts **+1 day** to recover the real date.
+  - `vw_btc_training_daily` — **same real-date** join (`mvrvz_date =
+    DATE(time_period_start) + 1 day`); columns `date, price_close, rsi,
+    mvrv_zscore`.
+  - `vw_btc_training_weekly` — joins the **MVRV of the week's Sunday** against the
+    weekly RSI row labelled by its **Monday**; with the lag, the Sunday's real
+    value lives under `mvrvz_date = Monday + 7 days`. Columns `week_start_monday,
+    week_end_sunday, price_close, rsi, mvrv_zscore`.
+  - Both filter `rsi_period = 14` and drop the warm-up (`rsi IS NOT NULL`). They
+    are views on purpose (tiny dataset, always fresh); freeze an experiment with
+    `CREATE TABLE <snapshot> AS SELECT * FROM <view>`.
 
 ---
 
@@ -214,7 +263,15 @@ Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
 │   ├── dags/                        # 📁 daily DAG (pending)
 │   ├── ingest/
 │   │   ├── __init__.py              # ✅ re-exports ingest_daily_candles, fetch_daily_candles_range
-│   │   ├── binance_ingest.py        # ✅ Binance CCXT ingestion → bronze (single day or range/backfill)
+│   │   ├── ccxt_candle_common.py    # ✅ Shared CCXT→bronze logic (NOT an entry-point)
+│   │   ├── binance_btc_ingest.py    # ✅ Thin Binance BTC entry-point (single day or range/backfill)
+│   │   ├── bitstamp_btc_ingest.py   # ✅ Thin Bitstamp BTC entry-point (pre-Binance history)
+│   │   ├── bitcoin_data_mvrv_ingest.py # ✅ MVRV Z-Score ingestion (bitcoin-data.com) → bronze (CSV backfill + daily API update)
+│   │   ├── yahoo_dxy_ingest.py      # ✅ DXY ingestion (Yahoo DX-Y.NYB) → bronze (backfill + daily update, closed bars only)
+│   │   ├── fred_common.py           # ✅ Shared FRED logic + primitives (NOT an entry-point)
+│   │   ├── fred_10y_ingest.py       # ✅ Thin 10Y Treasury (DGS10) entry-point → bronze
+│   │   ├── fred_fedfunds_ingest.py  # ✅ Thin Fed funds (DFF) entry-point → bronze
+│   │   ├── fred_m2_ingest.py        # ✅ M2 ingestion (FRED/ALFRED WM2NS) → bronze with point-in-time vintages
 │   │   └── requirements.txt         # ✅ ingestion deps (ccxt, google-cloud-bigquery, tenacity)
 │   └── alerts/                      # 📁 Telegram client (pending)
 ├── dataflow/                        # Beam pipeline (SHIPPED to GCP)
@@ -234,6 +291,11 @@ Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
 │   ├── test_signals.py              # ✅ trend walk-forward + BUY/SELL/NEUTRAL + DoFn
 │   ├── test_conform.py              # ✅ bronze→silver row normalisation
 │   ├── test_cleanup.py              # ✅ filter/clause/target helpers + clean_tables
+│   ├── test_ccxt_candle_common.py   # ✅ shared CCXT ingest: mapping, closed-bar/sort, MERGE (symbol,candle_date), entry-point config
+│   ├── test_bitcoin_data_mvrv_ingest.py # ✅ MVRV ingest: CSV parser, historical correction + missing-value alert, MERGE chunking, DDL contract
+│   ├── test_yahoo_dxy_ingest.py     # ✅ DXY ingest: chart parser, null/in-progress-bar skip, MERGE chunking, DDL contract
+│   ├── test_fred_common.py          # ✅ Plain FRED ingest: observations parser, `.`→NULL, chunking, 10Y/Fed funds entry-point config, DDL contract
+│   ├── test_fred_m2_ingest.py       # ✅ M2 ingest: ALFRED vintage parser, point-in-time composite key, MERGE chunking, DDL contract
 │   ├── test_sql_contracts.py        # ✅ SQL-template guards (WEEK(MONDAY), OHLC rules, MERGE keys)
 │   └── test_integration_bq.py       # ✅ live-BQ validations + opt-in pipeline replay (-m integration)
 ├── pyproject.toml                   # ✅ pytest + coverage config

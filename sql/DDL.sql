@@ -141,8 +141,9 @@ ON T.source_id = S.source_id
 WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
 VALUES (3, 'Binance (CCXT)', 3, TRUE, 'https://api.binance.com', 'Binance', CURRENT_TIMESTAMP());
 
--- Bitstamp candles ingested via CCXT (same ingest module as Binance, switched
--- by env vars). Extends BTC history before Binance's BTC/USDT listing
+-- Bitstamp candles ingested via CCXT (bitstamp_btc_ingest.py, a thin entry-point
+-- over the same ccxt_candle_common.py shared by Binance). Extends BTC history
+-- before Binance's BTC/USDT listing
 -- (2017-08-17): Bitstamp trades BTC/USD continuously since ~2011-08. Same
 -- shape and upsert pattern as the Binance table: partitioned by the candle's
 -- own date, idempotent MERGE on (symbol, candle_date). Cut-over policy:
@@ -174,6 +175,146 @@ USING (SELECT 4 AS source_id) S
 ON T.source_id = S.source_id
 WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
 VALUES (4, 'Bitstamp (CCXT)', 4, TRUE, 'https://www.bitstamp.net/api/', 'Bitstamp', CURRENT_TIMESTAMP());
+
+-- MVRV Z-Score (BTC on-chain valuation metric) from bitcoin-data.com
+-- (BGeometrics). Unlike the OHLCV bronze tables this is NOT candle data: it is a
+-- single daily metric series (one value per UTC date), and it does NOT feed the
+-- OHLCV `conform` consolidation — it is a standalone feature source. Same
+-- idempotency pattern as the candle tables: partitioned by the metric's own
+-- date, daily upsert (MERGE) on the business key `mvrvz_date`. Full history is
+-- back-filled once from the CSV export
+-- (https://bitcoin-data.com/v1/mvrv-zscore/csv, from 2009-01-03) and then
+-- refreshed daily from the API (https://bitcoin-data.com/v1/mvrv-zscore/last).
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.bitcoin_data_mvrv_zscore_daily_raw` (
+  mvrvz_date      DATE      NOT NULL OPTIONS(description = "Metric date (UTC); source field `d`. Business key and partition column."),
+  unix_ts         INT64     OPTIONS(description = "Unix timestamp (seconds) of the metric date, as delivered by the source (raw, field `unixTs`)."),
+  mvrv_zscore     FLOAT64   OPTIONS(description = "MVRV Z-Score value (source field `mvrvZscore`). NULL when the source delivers no value (e.g. NaN) for the date."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (mvrvz_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY mvrvz_date
+OPTIONS(description = "Raw daily BTC MVRV Z-Score from bitcoin-data.com (BGeometrics). Idempotent daily upsert on mvrvz_date; full history back-filled from the CSV export.");
+
+-- Register bitcoin-data.com (BGeometrics) as a source. Idempotent seed.
+-- priority is NULL on purpose: this source feeds the standalone MVRV table, not
+-- the OHLCV consolidation, so it never competes in `conform`'s priority de-dup.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 5 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (5, 'bitcoin-data.com MVRV Z-Score (BGeometrics)', NULL, TRUE, 'https://bitcoin-data.com/v1/mvrv-zscore', 'BGeometrics', CURRENT_TIMESTAMP());
+
+-- ---------------------------------------------------------------------
+-- Macro feature sources (DXY, M2, 10Y Treasury, Fed funds)
+-- Standalone daily/weekly feature series for the ML training layer. Like MVRV,
+-- these are NOT candle data and do NOT feed the OHLCV `conform` consolidation;
+-- each is its own bronze table, partitioned by its own date, with an idempotent
+-- MERGE on its natural key. Full history is back-filled once, then refreshed
+-- daily. All registered with priority NULL (they never compete in `conform`).
+-- NOTE: the long daily series (DXY since 1971, DGS10 since 1962, DFF since 1954)
+-- partition by MONTH (DATE_TRUNC(..., MONTH)), not day: at daily granularity they
+-- would exceed BigQuery's hard 10000-partitions-per-table limit. M2 (weekly) and
+-- MVRV (daily since 2009) stay under the limit, so they keep day granularity.
+-- ---------------------------------------------------------------------
+
+-- DXY (ICE U.S. Dollar Index, 6-currency) from Yahoo Finance (symbol DX-Y.NYB).
+-- Real ICE DXY (not the Fed's broad index), daily OHLC since 1971. Bronze keeps
+-- the bars as delivered; idempotent upsert on the bar's own date (dxy_date).
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.yahoo_dxy_daily_raw` (
+  dxy_date        DATE      NOT NULL OPTIONS(description = "Trading-day date (UTC) of the daily bar, derived from the Yahoo chart timestamp. Business key and partition column."),
+  price_open      FLOAT64   OPTIONS(description = "Open value of the index for the day."),
+  price_high      FLOAT64   OPTIONS(description = "High value of the index for the day."),
+  price_low       FLOAT64   OPTIONS(description = "Low value of the index for the day."),
+  price_close     FLOAT64   OPTIONS(description = "Close value of the index for the day."),
+  volume_traded   FLOAT64   OPTIONS(description = "Volume as delivered by Yahoo; an index typically reports 0 or NULL."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (dxy_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY DATE_TRUNC(dxy_date, MONTH)
+OPTIONS(description = "Raw daily ICE U.S. Dollar Index (DXY) bars from Yahoo Finance (DX-Y.NYB). Idempotent daily upsert on dxy_date; full history back-filled from the chart API. Partitioned by MONTH (not day): ~55 years of daily bars would exceed BigQuery's 10000-partitions-per-table limit at daily granularity.");
+
+-- Register Yahoo Finance (DXY) as a source. Idempotent seed. priority NULL: a
+-- standalone feature source, never part of the OHLCV `conform` consolidation.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 6 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (6, 'Yahoo Finance DXY (DX-Y.NYB)', NULL, TRUE, 'https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB', 'Yahoo Finance', CURRENT_TIMESTAMP());
+
+-- M2 money stock (WM2NS, weekly, NSA) from FRED/ALFRED with point-in-time
+-- vintages. Unlike the other macro series, M2 is REVISED and published with a
+-- lag, so to build features without look-ahead we store every ALFRED vintage:
+-- the natural key is (wm2ns_date, realtime_start). To reconstruct what was known
+-- on day X, pick the row with realtime_start <= X <= realtime_end for each
+-- wm2ns_date. realtime_end is 9999-12-31 while the value is the latest revision
+-- (mutable: set when a newer vintage supersedes it).
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.fred_wm2ns_weekly_raw` (
+  wm2ns_date      DATE      NOT NULL OPTIONS(description = "Observation/period date as delivered by FRED (field `date`); WM2NS weeks end on Monday. Part of the business key and the partition column."),
+  realtime_start  DATE      NOT NULL OPTIONS(description = "ALFRED vintage start: first date this value was the published one. Part of the business key; this is what makes the series point-in-time (no look-ahead)."),
+  realtime_end    DATE      OPTIONS(description = "ALFRED vintage end: last date this value was current (9999-12-31 while it is the latest revision). Mutable — set when a newer vintage supersedes this value."),
+  m2_value        FLOAT64   OPTIONS(description = "M2 money stock (WM2NS), billions of USD, not seasonally adjusted. NULL when FRED delivers `.` (missing)."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (wm2ns_date, realtime_start) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY wm2ns_date
+OPTIONS(description = "Raw weekly M2 (WM2NS, NSA) from FRED/ALFRED with point-in-time vintages. Idempotent upsert on (wm2ns_date, realtime_start); full vintage history back-filled from ALFRED.");
+
+-- Register FRED M2 (WM2NS) as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 7 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (7, 'FRED M2 WM2NS (ALFRED vintages)', NULL, TRUE, 'https://api.stlouisfed.org/fred/series/observations', 'FRED / St. Louis Fed', CURRENT_TIMESTAMP());
+
+-- 10-Year Treasury Constant Maturity yield (DGS10, daily, percent) from FRED.
+-- Not revised in any material way, so no vintages: a plain (date, value) series.
+-- Generic column names (obs_date/obs_value) are shared with the DFF table below
+-- because both are loaded by thin entry-points (fred_10y_ingest.py /
+-- fred_fedfunds_ingest.py) over the same fred_common.py logic.
+-- Non-publication days (FRED `.`) are dropped, not stored as NULL.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.fred_dgs10_daily_raw` (
+  obs_date        DATE      NOT NULL OPTIONS(description = "Observation date as delivered by FRED (field `date`). Business key and partition column."),
+  obs_value       FLOAT64   OPTIONS(description = "Series value: 10-Year Treasury Constant Maturity yield (DGS10), percent."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (obs_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY DATE_TRUNC(obs_date, MONTH)
+OPTIONS(description = "Raw daily 10-Year Treasury yield (DGS10) from FRED. Idempotent upsert on obs_date; full history back-filled from the FRED API. Partitioned by MONTH: DGS10 since 1962 (>16000 business days) exceeds BigQuery's 10000-partitions-per-table limit at daily granularity.");
+
+-- Register FRED DGS10 as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 8 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (8, 'FRED 10Y Treasury (DGS10)', NULL, TRUE, 'https://api.stlouisfed.org/fred/series/observations', 'FRED / St. Louis Fed', CURRENT_TIMESTAMP());
+
+-- Effective Federal Funds Rate (DFF, daily, percent) from FRED. Same plain
+-- (obs_date, obs_value) shape as DGS10 (shared fred_common.py logic). Not revised.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.fred_dff_daily_raw` (
+  obs_date        DATE      NOT NULL OPTIONS(description = "Observation date as delivered by FRED (field `date`). Business key and partition column."),
+  obs_value       FLOAT64   OPTIONS(description = "Series value: Effective Federal Funds Rate (DFF), percent."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (obs_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY DATE_TRUNC(obs_date, MONTH)
+OPTIONS(description = "Raw daily Effective Federal Funds Rate (DFF) from FRED. Idempotent upsert on obs_date; full history back-filled from the FRED API. Partitioned by MONTH: DFF since 1954 (>26000 days) exceeds BigQuery's 10000-partitions-per-table limit at daily granularity.");
+
+-- Register FRED DFF as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 9 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (9, 'FRED Fed Funds (DFF)', NULL, TRUE, 'https://api.stlouisfed.org/fred/series/observations', 'FRED / St. Louis Fed', CURRENT_TIMESTAMP());
 
 
 -- ---------------------------------------------------------------------
@@ -292,3 +433,61 @@ WHEN NOT MATCHED THEN INSERT (
   CURRENT_TIMESTAMP(),
   'Baseline seed — replace with AG-optimised values from ag-determina-parametros-de-estrategia-rsi.ipynb.'
 );
+
+
+-- ---------------------------------------------------------------------
+-- prod_trade_gold — consumption views (ML training sets)
+-- Curated, read-only joins that line up BTC close, RSI and MVRV Z-Score in one
+-- row for model training. They are VIEWS on purpose (the dataset is tiny and a
+-- view stays always-fresh with zero maintenance); freeze an experiment with
+-- `CREATE TABLE <snapshot> AS SELECT * FROM <view>` or export to GCS.
+-- Both filter rsi_period = 14 (the active strategy period) and drop the RSI
+-- warm-up rows (rsi IS NULL). close_price and rsi already co-live in
+-- silver.rsi_features; only MVRV (bronze) is joined in.
+--
+-- MVRV 1-day publication lag: the source reports the metric of day D-1 under
+-- mvrvz_date = D (e.g. the row dated 2026-06-10 is really the 2026-06-09 value).
+-- So to recover the real metric date we shift the join by +1 day: a trading day
+-- D pairs with mvrvz_date = D + 1 (whose real value is D).
+-- ---------------------------------------------------------------------
+
+-- Daily: MVRV (real date) of day D against the daily RSI row of day D. With the
+-- 1-day lag, the real value of D lives under mvrvz_date = D + 1.
+CREATE OR REPLACE VIEW `trade-390514.prod_trade_gold.vw_btc_training_daily`
+OPTIONS(description = "Daily BTC training set: date, close price, daily RSI(14) and MVRV Z-Score aligned on the same calendar date. The MVRV source lags 1 day (value of D published under mvrvz_date D+1), so the join shifts +1 day. Read-only join of silver.rsi_features (1d) and bronze MVRV.")
+AS
+SELECT
+  DATE(r.time_period_start) AS date,
+  r.price_close,
+  r.rsi,
+  m.mvrv_zscore
+FROM `trade-390514.prod_trade_silver.rsi_features` AS r
+JOIN `trade-390514.prod_trade_bronze.bitcoin_data_mvrv_zscore_daily_raw` AS m
+  ON m.mvrvz_date = DATE_ADD(DATE(r.time_period_start), INTERVAL 1 DAY)  -- +1: undo MVRV publication lag
+WHERE r.symbol = 'BTCUSD'
+  AND r.temporality = '1d'
+  AND r.rsi_period = 14
+  AND r.rsi IS NOT NULL;          -- drop the 14-day warm-up (rsi NULL)
+
+-- Weekly: the weekly RSI row is labelled by its Monday (WEEK(MONDAY) open); it
+-- is paired with the MVRV of THAT week's Sunday (Monday + 6 days), i.e. the day
+-- that closes the week — consistent with the weekly close being the last day's
+-- close. With the 1-day MVRV lag, the Sunday's real value lives under
+-- mvrvz_date = Sunday + 1 = Monday + 7, so the join offset is +7 days (the
+-- exposed week_end_sunday column stays Monday + 6, the true Sunday date).
+CREATE OR REPLACE VIEW `trade-390514.prod_trade_gold.vw_btc_training_weekly`
+OPTIONS(description = "Weekly BTC training set: week (Monday open / Sunday close), weekly close price, weekly RSI(14) and the MVRV Z-Score of that week's Sunday. The MVRV source lags 1 day, so the Sunday value lives under mvrvz_date = Monday + 7; the join uses +7 days. Read-only join of silver.rsi_features (1w) and bronze MVRV.")
+AS
+SELECT
+  DATE(r.time_period_start)                          AS week_start_monday,
+  DATE_ADD(DATE(r.time_period_start), INTERVAL 6 DAY) AS week_end_sunday,
+  r.price_close,
+  r.rsi,
+  m.mvrv_zscore
+FROM `trade-390514.prod_trade_silver.rsi_features` AS r
+JOIN `trade-390514.prod_trade_bronze.bitcoin_data_mvrv_zscore_daily_raw` AS m
+  ON m.mvrvz_date = DATE_ADD(DATE(r.time_period_start), INTERVAL 7 DAY)  -- +7: Sunday(+6) plus the 1-day lag
+WHERE r.symbol = 'BTCUSD'
+  AND r.temporality = '1w'
+  AND r.rsi_period = 14
+  AND r.rsi IS NOT NULL;          -- drop the weekly warm-up (rsi NULL)

@@ -1,22 +1,17 @@
-"""Daily BTC candle ingestion: Binance (via CCXT) -> BigQuery bronze.
+"""Shared CCXT daily-candle ingestion logic (bronze loader).
 
-Downloads daily BTC/USDT candles from Binance and upserts them into
-``prod_trade_bronze.binance_btcusd_daily_raw``. The upsert (MERGE on the
-business key ``symbol + candle_date``) makes re-runs idempotent: replaying any
-day never duplicates a candle.
+This module holds the logic common to every CCXT exchange we ingest BTC candles
+from; it is **not an entry-point**. Each exchange has a thin
+``<source>_<symbol>_ingest.py`` wrapper (e.g. ``binance_btc_ingest.py``,
+``bitstamp_btc_ingest.py``) that pins a :class:`CcxtCandleSource` config and
+re-exports the bound functions. Keeping one implementation here means a fix
+(e.g. the CCXT pagination-truncation fix) lands once for all exchanges; the
+bronze schema and the idempotent MERGE on ``(symbol, candle_date)`` are identical
+across them, so only the config (exchange id, symbol, target table, source id)
+differs.
 
-``ingest_daily_candles`` handles both the daily job (no arguments -> yesterday's
-candle) and back-fills (pass an earlier ``start_date``); a range is fetched with
-CCXT's ``since``/``until``/``paginate``. Designed to run as an Airflow
-``PythonOperator`` and to be runnable standalone for local testing:
-``python -m airflow.ingest.binance_ingest --start 2024-01-01 --end 2024-01-31``.
-
-Authentication is handled by Google Application Default Credentials, so the same
-code works in every environment without changes:
-  * Local: ``gcloud auth application-default login`` (ADC), or set
-    ``GOOGLE_APPLICATION_CREDENTIALS`` to the service-account JSON.
-  * VM/CI: ``GOOGLE_APPLICATION_CREDENTIALS`` pointing at the service-account
-    key, or the VM's attached service account (metadata server).
+Authentication for BigQuery is Google Application Default Credentials, so the
+same code runs locally and on the VM/CI.
 """
 
 from __future__ import annotations
@@ -24,6 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 import ccxt
@@ -41,17 +37,27 @@ logger = logging.getLogger(__name__)
 # --- Configuration (overridable via environment variables) -------------------
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "trade-390514")
 BQ_DATASET = os.environ.get("BQ_BRONZE_DATASET", "prod_trade_bronze")
-BQ_TABLE = os.environ.get("BQ_BRONZE_TABLE", "binance_btcusd_daily_raw")
-EXCHANGE_ID = os.environ.get("CCXT_EXCHANGE", "binance")
-SYMBOL = os.environ.get("BINANCE_SYMBOL", "BTC/USDT")
 TIMEFRAME = "1d"
-SOURCE_ID = int(os.environ.get("BINANCE_SOURCE_ID", "3"))
 
 _MS_PER_DAY = 24 * 60 * 60 * 1000
 
 
-def _table_fqn() -> str:
-    return f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+@dataclass(frozen=True)
+class CcxtCandleSource:
+    """Per-exchange config for the shared CCXT candle ingest.
+
+    The thin entry-points build one of these and pass it to the functions below;
+    everything that differs between exchanges lives here.
+    """
+
+    exchange_id: str   # CCXT id, e.g. "binance" / "bitstamp"
+    symbol: str        # CCXT unified symbol, e.g. "BTC/USDT" / "BTC/USD"
+    table: str         # bronze table name (in BQ_DATASET)
+    source_id: int     # FK into prod_trade_control.source_priority
+
+
+def _table_fqn(table: str) -> str:
+    return f"{PROJECT_ID}.{BQ_DATASET}.{table}"
 
 
 def _day_start_ms(target_date: date) -> int:
@@ -71,23 +77,23 @@ def _day_start_ms(target_date: date) -> int:
     reraise=True,
 )
 def fetch_daily_candles_range(
+    cfg: CcxtCandleSource,
     start_date: date,
     end_date: date,
     exchange=None,
-    symbol: str = SYMBOL,
 ) -> list:
     """Return the closed daily candles for ``[start_date, end_date]`` (UTC, inclusive).
 
     Each item is the CCXT tuple ``[open_time_ms, open, high, low, close,
     volume]``, sorted by ascending open time. The range is bounded with CCXT's
     unified ``since`` (start) and ``params['until']`` (end), and
-    ``params['paginate']`` lets CCXT walk Binance's 1000-candle pages for us.
-    With transparent pagination, ``limit`` is the TOTAL number of candles
+    ``params['paginate']`` lets CCXT walk the exchange's 1000-candle pages for
+    us. With transparent pagination, ``limit`` is the TOTAL number of candles
     requested (not the per-page size), so it must cover the whole range —
     passing a constant 1000 would silently truncate back-fills longer than
     1000 days at the first page.
     Candles whose day has not fully closed yet (open time within the last 24 h)
-    are dropped, mirroring the "closed candle only" rule of ``fetch_daily_candle``.
+    are dropped, keeping the "closed candle only" rule.
 
     Transient network errors (``ccxt.NetworkError`` subclasses) retry the whole
     range up to 5 times with exponential back-off + jitter (max 30 s per wait).
@@ -98,7 +104,7 @@ def fetch_daily_candles_range(
             f"({start_date.isoformat()})."
         )
     if exchange is None:
-        exchange = getattr(ccxt, EXCHANGE_ID)({"enableRateLimit": True})
+        exchange = getattr(ccxt, cfg.exchange_id)({"enableRateLimit": True})
 
     since = _day_start_ms(start_date)
     until = _day_start_ms(end_date)
@@ -108,7 +114,7 @@ def fetch_daily_candles_range(
     total_days = (end_date - start_date).days + 1
 
     candles = exchange.fetch_ohlcv(
-        symbol,
+        cfg.symbol,
         timeframe=TIMEFRAME,
         since=since,
         limit=total_days,
@@ -120,13 +126,13 @@ def fetch_daily_candles_range(
     return closed
 
 
-def _build_row(candle, symbol: str = SYMBOL, fetched_at: datetime | None = None) -> dict:
+def _build_row(candle, cfg: CcxtCandleSource, fetched_at: datetime | None = None) -> dict:
     open_time_ms, price_open, price_high, price_low, price_close, volume = candle
     candle_date = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc).date()
     return {
-        "source_id": SOURCE_ID,
+        "source_id": cfg.source_id,
         "datetime_update": fetched_at or datetime.now(timezone.utc),
-        "symbol": symbol,
+        "symbol": cfg.symbol,
         "candle_date": candle_date,
         "open_time": int(open_time_ms),
         "price_open": float(price_open),
@@ -137,8 +143,8 @@ def _build_row(candle, symbol: str = SYMBOL, fetched_at: datetime | None = None)
     }
 
 
-def _upsert_rows(client: bigquery.Client, rows: list[dict]) -> None:
-    """Idempotent MERGE of one or more candle rows into the bronze table.
+def _upsert_rows(client: bigquery.Client, table: str, rows: list[dict]) -> None:
+    """Idempotent MERGE of one or more candle rows into ``table``.
 
     Rows are passed as a single ``ARRAY<STRUCT>`` query parameter and unnested
     server-side, so any batch (a single day or a full back-fill) is one MERGE
@@ -165,7 +171,7 @@ def _upsert_rows(client: bigquery.Client, rows: list[dict]) -> None:
         for r in rows
     ]
     query = f"""
-    MERGE `{_table_fqn()}` AS T
+    MERGE `{_table_fqn(table)}` AS T
     USING (
       -- Dedupe within the batch so MERGE never sees the same key twice.
       SELECT * EXCEPT(rn) FROM (
@@ -200,17 +206,18 @@ def _upsert_rows(client: bigquery.Client, rows: list[dict]) -> None:
 
 
 def ingest_daily_candles(
+    cfg: CcxtCandleSource,
     start_date: date | None = None,
     end_date: date | None = None,
     client: bigquery.Client | None = None,
 ) -> list[dict]:
-    """Fetch every closed daily BTC candle in ``[start_date, end_date]`` and upsert them.
+    """Fetch every closed daily candle in ``[start_date, end_date]`` and upsert them.
 
     Both bounds default to yesterday (UTC), the most recent fully closed daily
-    candle, so calling with no arguments ingests just that one day (the daily
-    job); passing an earlier ``start_date`` back-fills the range. Returns the
-    rows that were written (empty if the range contains no closed candle). The
-    MERGE on ``symbol + candle_date`` keeps overlapping back-fills idempotent.
+    candle, so calling with no dates ingests just that one day (the daily job);
+    passing an earlier ``start_date`` back-fills the range. Returns the rows that
+    were written (empty if the range contains no closed candle). The MERGE on
+    ``symbol + candle_date`` keeps overlapping back-fills idempotent.
     """
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
     if start_date is None:
@@ -221,27 +228,27 @@ def ingest_daily_candles(
     try:
         logger.info(
             "Fetching %s %s candles for %s..%s",
-            SYMBOL, TIMEFRAME, start_date.isoformat(), end_date.isoformat(),
+            cfg.symbol, TIMEFRAME, start_date.isoformat(), end_date.isoformat(),
         )
         fetched_at = datetime.now(timezone.utc)
-        candles = fetch_daily_candles_range(start_date, end_date)
+        candles = fetch_daily_candles_range(cfg, start_date, end_date)
         if not candles:
             logger.warning(
                 "No closed candles for %s in %s..%s",
-                SYMBOL, start_date.isoformat(), end_date.isoformat(),
+                cfg.symbol, start_date.isoformat(), end_date.isoformat(),
             )
             return []
-        rows = [_build_row(c, fetched_at=fetched_at) for c in candles]
+        rows = [_build_row(c, cfg, fetched_at=fetched_at) for c in candles]
 
-        if client is None:
+        if client is None:  # pragma: no cover - live client
             client = bigquery.Client(project=PROJECT_ID)
 
         logger.info(
             "Upserting %d candle(s) %s..%s into %s",
             len(rows), rows[0]["candle_date"].isoformat(),
-            rows[-1]["candle_date"].isoformat(), _table_fqn(),
+            rows[-1]["candle_date"].isoformat(), _table_fqn(cfg.table),
         )
-        _upsert_rows(client, rows)
+        _upsert_rows(client, cfg.table, rows)
         logger.info("Ingestion complete: %d candle(s) written", len(rows))
         return rows
     except Exception:
@@ -254,33 +261,26 @@ def ingest_daily_candles(
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Ingest daily BTC candles from Binance into BigQuery bronze."
+        description="Ingest daily BTC candles from a CCXT exchange into BigQuery bronze."
     )
     iso_date = lambda s: datetime.strptime(s, "%Y-%m-%d").date()
     parser.add_argument(
-        "--start",
-        type=iso_date,
-        default=None,
+        "--start", type=iso_date, default=None,
         help="First UTC date to ingest (YYYY-MM-DD). Defaults to yesterday (UTC).",
     )
     parser.add_argument(
-        "--end",
-        type=iso_date,
-        default=None,
+        "--end", type=iso_date, default=None,
         help="Last UTC date to ingest (YYYY-MM-DD), inclusive. Defaults to --start.",
     )
     return parser.parse_args(argv)
 
 
-def main(argv=None) -> None:
+def run_cli(cfg: CcxtCandleSource, argv=None) -> None:  # pragma: no cover - CLI wiring
+    """Shared CLI for the thin exchange entry-points."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = _parse_args(argv)
     # End defaults to start so "--start D" ingests a single day; with neither,
     # ingest_daily_candles falls back to yesterday for both bounds.
     end = args.end if args.end is not None else args.start
-    rows = ingest_daily_candles(start_date=args.start, end_date=end)
+    rows = ingest_daily_candles(cfg, start_date=args.start, end_date=end)
     logger.info("Wrote %d row(s)", len(rows))
-
-
-if __name__ == "__main__":
-    main()
