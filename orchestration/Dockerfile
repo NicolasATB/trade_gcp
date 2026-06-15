@@ -22,7 +22,12 @@ RUN pip install --no-cache-dir -r /tmp/airflow-extra-requirements.txt
 #    Beam lives in its own interpreter. Reuses dataflow/requirements.txt as the
 #    single source of truth for the pipeline's deps. The DAG (T-12) invokes
 #    /opt/beam-venv/bin/python with PYTHONPATH=/opt/airflow/repo.
+#    Built as root because /opt is root-owned (the image runs as the non-root
+#    `airflow` user); the venv ends up world-readable/executable, so the airflow
+#    user can run it at runtime. We drop back to USER airflow afterwards.
 COPY dataflow/requirements.txt /tmp/beam-requirements.txt
+USER root
 RUN python -m venv /opt/beam-venv \
     && /opt/beam-venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/beam-venv/bin/pip install --no-cache-dir -r /tmp/beam-requirements.txt
+USER airflow
