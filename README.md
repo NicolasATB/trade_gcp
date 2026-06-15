@@ -321,7 +321,14 @@ Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
 ├── .gitignore                       # ✅ ignores venv, __pycache__, secrets, etc.
 ├── README.md                        # ✅ this file
 ├── orchestration/                         # runs INSIDE Airflow on the VM
-│   ├── docker-compose.yaml          # ✅ Airflow stack (deployment placeholder)
+│   ├── docker-compose.yaml          # ✅ Airflow stack: LocalExecutor + Postgres (no Celery)
+│   ├── Dockerfile                   # ✅ Airflow 2.10.5 image + ingest deps + isolated Beam venv
+│   ├── requirements.txt             # ✅ extra deps baked into the Airflow env (+ Google provider)
+│   ├── .env.example                 # ✅ secrets/config template (real .env is git-ignored)
+│   ├── README.md                    # ✅ deployment guide (provision + bring up Airflow)
+│   ├── scripts/
+│   │   └── provision_vm.sh          # ✅ gcloud bootstrap: e2-micro VM + 2 GB swap + Docker
+│   ├── plugins/                     # 📁 Airflow plugins (empty)
 │   ├── dags/                        # 📁 daily DAG (pending)
 │   ├── ingest/
 │   │   ├── __init__.py              # ✅ re-exports ingest_daily_candles, fetch_daily_candles_range
@@ -436,9 +443,22 @@ sources of truth — assumed and documented, not an oversight.
    cd terraform_infra
    terraform init && terraform plan && terraform apply
    ```
-5. **Airflow on the VM.** Bring up Airflow with Docker Compose from `orchestration/`, and
-   place the secrets (service account, Telegram token / `chat_id`) on the VM
-   securely.
+5. **Airflow on the VM.** Provision the e2-micro VM and bring up Airflow with
+   Docker Compose (`orchestration/`). The stack is trimmed to **LocalExecutor +
+   Postgres** (no Celery/Redis) to fit ~1 GB of RAM, with **2 GB of swap** added
+   by the bootstrap; Beam runs in an isolated venv so it does not clash with
+   Airflow's deps. Place the secrets (service-account key, Telegram token /
+   `chat_id`) on the VM via `.env` + a mounted `keys/sa.json` — never committed.
+   ```bash
+   cd orchestration
+   ./scripts/provision_vm.sh                  # create the VM (gcloud bootstrap)
+   # then, on the VM:
+   cp .env.example .env                        # fill in real secrets
+   docker compose build
+   docker compose up airflow-init && docker compose up -d
+   ```
+   The VM is created with `gcloud` as a bootstrap step; **T-14** codifies the same
+   VM in Terraform. See `orchestration/README.md` for the full guide.
 6. **Telegram bot.** Create the bot, obtain its token and `chat_id`, and store them
    as secrets — never in the repo.
 

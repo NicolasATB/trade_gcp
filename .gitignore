@@ -85,4 +85,5 @@ tempCodeRunnerFile.py
 # Airflow deployment secrets (T-11) — never commit the real .env or the SA key,
 # but DO keep the placeholder template (.env is matched by *.env.* above).
 orchestration/keys/
+orchestration/logs/
 !orchestration/.env.example
