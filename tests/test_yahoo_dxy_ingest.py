@@ -1,4 +1,4 @@
-"""Unit tests for the DXY ingest (``airflow/ingest/yahoo_dxy_ingest.py``).
+"""Unit tests for the DXY ingest (``orchestration/ingest/yahoo_dxy_ingest.py``).
 
 Covers the pure logic — Yahoo chart payload parsing (timestamp + OHLC arrays,
 null-close skip, sort, error/empty handling), row building, the closed-bar-only
@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from airflow.ingest import yahoo_dxy_ingest
-from airflow.ingest.yahoo_dxy_ingest import (
+from orchestration.ingest import yahoo_dxy_ingest
+from orchestration.ingest.yahoo_dxy_ingest import (
     _MERGE_SQL,
     _build_row,
     _closed_only,

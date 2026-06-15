@@ -1,6 +1,6 @@
 """Daily BTC candle ingestion: Bitstamp (via CCXT) -> BigQuery bronze.
 
-Thin entry-point over :mod:`airflow.ingest.ccxt_candle_common`: it only pins the
+Thin entry-point over :mod:`orchestration.ingest.ccxt_candle_common`: it only pins the
 Bitstamp config and re-exports the bound functions. Same shape and idempotent
 MERGE on ``(symbol, candle_date)`` as the Binance entry-point — only the
 exchange id, symbol, target table and source id differ.
@@ -16,21 +16,21 @@ requested range (it does not paginate backwards), so back-fills longer than
 1000 days must be run in <1000-day chunks.
 
 Run standalone (single day, or a range/back-fill):
-  python -m airflow.ingest.bitstamp_btc_ingest --start 2014-11-21 --end 2015-08-16
+  python -m orchestration.ingest.bitstamp_btc_ingest --start 2014-11-21 --end 2015-08-16
 """
 
 from __future__ import annotations
 
 import os
 
-from airflow.ingest.ccxt_candle_common import (
+from orchestration.ingest.ccxt_candle_common import (
     CcxtCandleSource,
     run_cli,
 )
-from airflow.ingest.ccxt_candle_common import (
+from orchestration.ingest.ccxt_candle_common import (
     fetch_daily_candles_range as _fetch_range,
 )
-from airflow.ingest.ccxt_candle_common import (
+from orchestration.ingest.ccxt_candle_common import (
     ingest_daily_candles as _ingest,
 )
 

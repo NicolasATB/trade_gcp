@@ -1,6 +1,6 @@
 """VIX ingestion: FRED VIXCLS -> BigQuery bronze.
 
-Thin entry-point over :mod:`airflow.ingest.fred_common`: it pins the VIXCLS config
+Thin entry-point over :mod:`orchestration.ingest.fred_common`: it pins the VIXCLS config
 and re-exports the bound functions. VIXCLS (CBOE Volatility Index, daily close,
 index points, since 1990) is not revised, so it is a plain ``(obs_date,
 obs_value)`` series — same code path as DGS10 / DGS2 / DFF, only the config
@@ -10,26 +10,26 @@ Authentication: ``FRED_API_KEY`` (env, never committed) for FRED; Application
 Default Credentials for BigQuery.
 
 Run standalone:
-  python -m airflow.ingest.fred_vix_ingest --backfill                  # full history
-  python -m airflow.ingest.fred_vix_ingest --start 2026-06-01 --end 2026-06-10
-  python -m airflow.ingest.fred_vix_ingest                             # recent window (daily)
+  python -m orchestration.ingest.fred_vix_ingest --backfill                  # full history
+  python -m orchestration.ingest.fred_vix_ingest --start 2026-06-01 --end 2026-06-10
+  python -m orchestration.ingest.fred_vix_ingest                             # recent window (daily)
 """
 
 from __future__ import annotations
 
 import os
 
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     FredSeries,
     run_cli,
 )
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     backfill_history as _backfill,
 )
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     ingest_latest as _ingest_latest,
 )
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     ingest_range as _ingest_range,
 )
 

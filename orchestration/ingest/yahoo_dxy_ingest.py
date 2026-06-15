@@ -32,9 +32,9 @@ Authentication: none for Yahoo; Google Application Default Credentials for
 BigQuery, so the same code runs locally and on the VM/CI.
 
 Run standalone:
-  python -m airflow.ingest.yahoo_dxy_ingest --backfill                 # full history
-  python -m airflow.ingest.yahoo_dxy_ingest --start 2026-06-01 --end 2026-06-10
-  python -m airflow.ingest.yahoo_dxy_ingest                            # recent window (daily)
+  python -m orchestration.ingest.yahoo_dxy_ingest --backfill                 # full history
+  python -m orchestration.ingest.yahoo_dxy_ingest --start 2026-06-01 --end 2026-06-10
+  python -m orchestration.ingest.yahoo_dxy_ingest                            # recent window (daily)
 """
 
 from __future__ import annotations

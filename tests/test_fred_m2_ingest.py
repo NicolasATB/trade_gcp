@@ -1,4 +1,4 @@
-"""Unit tests for the M2 point-in-time ingest (``airflow/ingest/fred_m2_ingest.py``).
+"""Unit tests for the M2 point-in-time ingest (``orchestration/ingest/fred_m2_ingest.py``).
 
 Covers the vintage-aware logic — ALFRED observations parsing that keeps the
 realtime window, ``.`` -> NULL handling, row building (incl. the open
@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from airflow.ingest import fred_m2_ingest
-from airflow.ingest.fred_m2_ingest import (
+from orchestration.ingest import fred_m2_ingest
+from orchestration.ingest.fred_m2_ingest import (
     _MERGE_SQL,
     _alert_missing,
     _build_row,

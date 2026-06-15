@@ -28,20 +28,20 @@ jobs:
           cache: pip
           cache-dependency-path: |
             dataflow/requirements.txt
-            airflow/ingest/requirements.txt
+            orchestration/ingest/requirements.txt
             requirements-dev.txt
 
-      # Tests import both the `dataflow` stages and the `airflow.ingest` modules,
+      # Tests import both the `dataflow` stages and the `orchestration.ingest` modules,
       # so both runtime requirement sets are needed, plus the dev/lint tools.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r dataflow/requirements.txt \
-                      -r airflow/ingest/requirements.txt \
+                      -r orchestration/ingest/requirements.txt \
                       -r requirements-dev.txt
 
       - name: Lint (ruff)
-        run: ruff check dataflow airflow tests
+        run: ruff check dataflow orchestration tests
 
       # pyproject's addopts already apply --cov=dataflow --cov-fail-under=85 and
       # deselect the integration marker, so a bare pytest is the full unit gate.
