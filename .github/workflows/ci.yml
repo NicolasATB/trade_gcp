@@ -1,0 +1,49 @@
+name: CI
+
+# Lint + tests on every push and on PRs to main (T-16). Unit tests only: the
+# `integration` marker (live BigQuery) is deselected by pyproject's addopts, so
+# CI needs no GCP credentials.
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+# A newer push to the same ref cancels the in-flight run (saves runner minutes;
+# Beam install is heavy).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match the pinned production runtime (apache-beam 2.60 + locked deps).
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            dataflow/requirements.txt
+            airflow/ingest/requirements.txt
+            requirements-dev.txt
+
+      # Tests import both the `dataflow` stages and the `airflow.ingest` modules,
+      # so both runtime requirement sets are needed, plus the dev/lint tools.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r dataflow/requirements.txt \
+                      -r airflow/ingest/requirements.txt \
+                      -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check dataflow airflow tests
+
+      # pyproject's addopts already apply --cov=dataflow --cov-fail-under=85 and
+      # deselect the integration marker, so a bare pytest is the full unit gate.
+      - name: Test (pytest)
+        run: pytest

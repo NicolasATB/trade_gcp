@@ -25,9 +25,13 @@ import os
 
 from airflow.ingest.ccxt_candle_common import (
     CcxtCandleSource,
-    fetch_daily_candles_range as _fetch_range,
-    ingest_daily_candles as _ingest,
     run_cli,
+)
+from airflow.ingest.ccxt_candle_common import (
+    fetch_daily_candles_range as _fetch_range,
+)
+from airflow.ingest.ccxt_candle_common import (
+    ingest_daily_candles as _ingest,
 )
 
 SOURCE = CcxtCandleSource(

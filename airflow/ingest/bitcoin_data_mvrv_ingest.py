@@ -378,7 +378,9 @@ def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Ingest BTC MVRV Z-Score from bitcoin-data.com into BigQuery bronze."
     )
-    iso_date = lambda s: datetime.strptime(s, "%Y-%m-%d").date()
+    def iso_date(s):
+        return datetime.strptime(s, "%Y-%m-%d").date()
+
     parser.add_argument(
         "--backfill", action="store_true",
         help="Back-fill the full history from the CSV export (ignores --start/--end).",

@@ -23,10 +23,16 @@ import os
 
 from airflow.ingest.fred_common import (
     FredSeries,
-    backfill_history as _backfill,
-    ingest_latest as _ingest_latest,
-    ingest_range as _ingest_range,
     run_cli,
+)
+from airflow.ingest.fred_common import (
+    backfill_history as _backfill,
+)
+from airflow.ingest.fred_common import (
+    ingest_latest as _ingest_latest,
+)
+from airflow.ingest.fred_common import (
+    ingest_range as _ingest_range,
 )
 
 SERIES = FredSeries(

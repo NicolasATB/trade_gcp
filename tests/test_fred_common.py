@@ -18,7 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from airflow.ingest import fred_2y_ingest, fred_10y_ingest, fred_fedfunds_ingest, fred_vix_ingest
+from airflow.ingest import (
+    fred_2y_ingest,
+    fred_10y_ingest,
+    fred_fedfunds_ingest,
+    fred_vix_ingest,
+)
 from airflow.ingest.fred_common import (
     _MERGE_SQL,
     FredSeries,

@@ -12,13 +12,12 @@ from datetime import date, datetime, timezone
 import pytest
 
 from dataflow.stages.signals import (
-    _ComputeSignalFn,
     _apply_signal,
     _compute_trend_state,
     _compute_trend_states,
+    _ComputeSignalFn,
     _week_start,
 )
-
 
 # ---------------------------------------------------------------------------
 # _week_start — Monday-based (weeks run Monday→Sunday), must match BigQuery

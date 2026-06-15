@@ -364,11 +364,12 @@ Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
 │   ├── test_fred_m2_ingest.py       # ✅ M2 ingest: ALFRED vintage parser, point-in-time composite key, MERGE chunking, DDL contract
 │   ├── test_sql_contracts.py        # ✅ SQL-template guards (WEEK(MONDAY), OHLC rules, MERGE keys)
 │   └── test_integration_bq.py       # ✅ live-BQ validations + opt-in pipeline replay (-m integration)
-├── pyproject.toml                   # ✅ pytest + coverage config
-├── requirements-dev.txt             # ✅ test/CI deps (pytest, pytest-cov, pytest-mock)
+├── pyproject.toml                   # ✅ pytest + coverage + ruff config
+├── requirements-dev.txt             # ✅ test/CI deps (pytest, pytest-cov, pytest-mock, ruff)
 ├── terraform_infra/                 # 📁 Terraform IaC (BigQuery + VM, pending)
 └── .github/
-    └── workflows/                   # 📁 GitHub Actions (pending)
+    └── workflows/
+        └── ci.yml                   # ✅ GitHub Actions: ruff lint + pytest on every push
 ```
 
 ---
@@ -459,9 +460,15 @@ sources of truth — assumed and documented, not an oversight.
   incremental RSI update reproduces exactly what a full bootstrap would
   (`test_incremental_matches_full_bootstrap`), guarding the no-duplicate-history
   guarantee that the BigQuery `MERGE` relies on.
+- **Lint (ruff):** static analysis runs alongside the tests. A focused, high-signal
+  ruleset (Pyflakes `F`, pycodestyle `E`/`W`, isort `I`) is configured in
+  `pyproject.toml`; run it with `ruff check dataflow airflow tests`.
 - **Run locally:**
   ```bash
-  pip install -r dataflow/requirements.txt -r requirements-dev.txt
+  pip install -r dataflow/requirements.txt \
+              -r airflow/ingest/requirements.txt \
+              -r requirements-dev.txt
+  ruff check dataflow airflow tests
   pytest
   ```
 - **Integration tests** (`test_integration_bq.py`, marker `integration`): read-only
@@ -479,8 +486,11 @@ sources of truth — assumed and documented, not an oversight.
   full pipeline twice over the latest bronze day and asserts stable counts — the
   manual T-08 check. It requires `TRADE_GCP_TEMP_LOCATION=gs://...` (slow, incurs
   GCP cost).
-- **GitHub Actions** in `.github/workflows/` will run lint + tests on every push
-  (T-16, pending). CI runs the unit suite only (integration stays deselected).
+- **GitHub Actions** (`.github/workflows/ci.yml`) runs **ruff lint + pytest** on
+  every push and on PRs to `main`, on Python 3.12 (matching the pinned runtime).
+  CI runs the unit suite only — the `integration` marker stays deselected, so no
+  GCP credentials are needed. The coverage gate (≥ 85 %) is enforced by the same
+  `pytest` run.
 
 ---
 

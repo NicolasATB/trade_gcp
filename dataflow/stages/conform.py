@@ -25,8 +25,8 @@ import logging
 from datetime import datetime, timezone
 
 import apache_beam as beam
-from apache_beam.io.gcp.bigquery import ReadFromBigQuery, WriteToBigQuery
 from apache_beam.io.gcp import bigquery as beam_bq
+from apache_beam.io.gcp.bigquery import ReadFromBigQuery, WriteToBigQuery
 from apache_beam.options.pipeline_options import PipelineOptions
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
