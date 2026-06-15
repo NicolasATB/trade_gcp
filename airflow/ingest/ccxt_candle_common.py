@@ -263,7 +263,9 @@ def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Ingest daily BTC candles from a CCXT exchange into BigQuery bronze."
     )
-    iso_date = lambda s: datetime.strptime(s, "%Y-%m-%d").date()
+    def iso_date(s):
+        return datetime.strptime(s, "%Y-%m-%d").date()
+
     parser.add_argument(
         "--start", type=iso_date, default=None,
         help="First UTC date to ingest (YYYY-MM-DD). Defaults to yesterday (UTC).",

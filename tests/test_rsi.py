@@ -14,7 +14,6 @@ import pytest
 
 from dataflow.stages.rsi import _rsi_value, compute_rsi_rows
 
-
 # ---------------------------------------------------------------------------
 # _rsi_value — the 0–100 transform with the zero-loss convention
 # ---------------------------------------------------------------------------
