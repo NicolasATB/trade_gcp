@@ -316,6 +316,81 @@ ON T.source_id = S.source_id
 WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
 VALUES (9, 'FRED Fed Funds (DFF)', NULL, TRUE, 'https://api.stlouisfed.org/fred/series/observations', 'FRED / St. Louis Fed', CURRENT_TIMESTAMP());
 
+-- 2-Year Treasury Constant Maturity yield (DGS2, daily, percent) from FRED. Same
+-- plain (obs_date, obs_value) shape and shared fred_common.py logic as DGS10/DFF
+-- (thin entry-point fred_2y_ingest.py). Ingested raw so the training views can
+-- derive the 10Y-2Y term spread (DGS10 - DGS2) and its recent change/slope: the
+-- spread level flags inversion, while its change captures the dis-inversion
+-- (steepening-from-negative) transition the level alone cannot distinguish.
+-- Not revised. Non-publication days (FRED `.`) are dropped, not stored as NULL.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.fred_dgs2_daily_raw` (
+  obs_date        DATE      NOT NULL OPTIONS(description = "Observation date as delivered by FRED (field `date`). Business key and partition column."),
+  obs_value       FLOAT64   OPTIONS(description = "Series value: 2-Year Treasury Constant Maturity yield (DGS2), percent."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (obs_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY DATE_TRUNC(obs_date, MONTH)
+OPTIONS(description = "Raw daily 2-Year Treasury yield (DGS2) from FRED. Idempotent upsert on obs_date; full history back-filled from the FRED API. Partitioned by MONTH: DGS2 since 1976 (>12000 business days) exceeds BigQuery's 10000-partitions-per-table limit at daily granularity.");
+
+-- Register FRED DGS2 as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 10 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (10, 'FRED 2Y Treasury (DGS2)', NULL, TRUE, 'https://api.stlouisfed.org/fred/series/observations', 'FRED / St. Louis Fed', CURRENT_TIMESTAMP());
+
+-- CBOE Volatility Index (VIX, VIXCLS, daily close, index points) from FRED. The
+-- equity-market "fear gauge"; a macro risk-appetite feature. Not revised: same
+-- plain (obs_date, obs_value) shape and shared fred_common.py logic as
+-- DGS10/DGS2/DFF (thin entry-point fred_vix_ingest.py). Non-publication days
+-- (FRED `.`) are dropped, not stored as NULL.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.fred_vixcls_daily_raw` (
+  obs_date        DATE      NOT NULL OPTIONS(description = "Observation date as delivered by FRED (field `date`). Business key and partition column."),
+  obs_value       FLOAT64   OPTIONS(description = "Series value: CBOE Volatility Index close (VIXCLS), index points."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (obs_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY DATE_TRUNC(obs_date, MONTH)
+OPTIONS(description = "Raw daily CBOE Volatility Index (VIXCLS) from FRED. Idempotent upsert on obs_date; full history (since 1990) back-filled from the FRED API. Partitioned by MONTH (consistent with the other long daily FRED series).");
+
+-- Register FRED VIXCLS as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 11 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (11, 'FRED VIX (VIXCLS)', NULL, TRUE, 'https://api.stlouisfed.org/fred/series/observations', 'FRED / St. Louis Fed', CURRENT_TIMESTAMP());
+
+-- BTC circulating supply (Coin Metrics community API, metric SplyCur, daily) from
+-- the free community endpoint (no key). Like MVRV it is NOT candle data and does
+-- NOT feed `conform`: one value per UTC date, its own bronze table, partitioned by
+-- its date, idempotent MERGE on `supply_date`. It is the on-chain input the daily
+-- training view turns into halving-cycle features: with the halving epoch fixed by
+-- date (epoch boundaries are known historical events) and a constant block subsidy
+-- within an epoch, circulating supply recovers the block-count fraction of the
+-- cycle (cycle_phase) and the annualised issuance rate. Full history back-filled
+-- once, then refreshed daily.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.coinmetrics_btc_supply_daily_raw` (
+  supply_date     DATE      NOT NULL OPTIONS(description = "Metric date (UTC); Coin Metrics `time`. Business key and partition column."),
+  circ_supply     FLOAT64   OPTIONS(description = "BTC circulating supply (Coin Metrics SplyCur), in BTC. NULL when the source delivers no value for the date."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (supply_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY supply_date
+OPTIONS(description = "Raw daily BTC circulating supply (Coin Metrics SplyCur) from the free community API. Idempotent daily upsert on supply_date; full history (since 2010) back-filled from the same endpoint.");
+
+-- Register Coin Metrics (BTC supply) as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 12 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (12, 'Coin Metrics BTC supply (SplyCur)', NULL, TRUE, 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics', 'Coin Metrics (community)', CURRENT_TIMESTAMP());
+
 
 -- ---------------------------------------------------------------------
 -- prod_trade_silver (Option B: symbol and temporality as columns)
@@ -437,13 +512,26 @@ WHEN NOT MATCHED THEN INSERT (
 
 -- ---------------------------------------------------------------------
 -- prod_trade_gold — consumption views (ML training sets)
--- Curated, read-only joins that line up BTC close, RSI and MVRV Z-Score in one
--- row for model training. They are VIEWS on purpose (the dataset is tiny and a
--- view stays always-fresh with zero maintenance); freeze an experiment with
+-- Curated, read-only joins that line up BTC close, RSI, MVRV Z-Score and the
+-- macro feature series (DXY, 10Y Treasury, Fed funds, M2) in one row for model
+-- training. They are VIEWS on purpose (the dataset is tiny and a view stays
+-- always-fresh with zero maintenance); freeze an experiment with
 -- `CREATE TABLE <snapshot> AS SELECT * FROM <view>` or export to GCS.
 -- Both filter rsi_period = 14 (the active strategy period) and drop the RSI
 -- warm-up rows (rsi IS NULL). close_price and rsi already co-live in
--- silver.rsi_features; only MVRV (bronze) is joined in.
+-- silver.rsi_features; MVRV and the macro series are joined in from bronze.
+--
+-- Macro features are aligned POINT-IN-TIME with an as-of join, not an equi-join:
+-- for each trading day D (the week's Sunday for the weekly view) each feature is
+-- the latest value KNOWN on or before D — forward-filling weekends/holidays
+-- (DXY/DGS10 don't quote every day) and never using a value from the future.
+-- BigQuery can't de-correlate a scalar `ORDER BY/LIMIT` subquery over another
+-- table, so the as-of is one CTE per series: a range-join (`<date> <= D`) trimmed
+-- to the latest row with `QUALIFY ROW_NUMBER() OVER (PARTITION BY D ORDER BY
+-- <date> DESC) = 1`. M2 (WM2NS) is the subtle one: it is revised and lagged, so
+-- we pick its POINT-IN-TIME vintage — the row whose realtime window contains D
+-- (`realtime_start <= D <= realtime_end`), latest observation week first. That is
+-- exactly what the stored ALFRED vintages are for (no look-ahead).
 --
 -- MVRV 1-day publication lag: the source reports the metric of day D-1 under
 -- mvrvz_date = D (e.g. the row dated 2026-06-10 is really the 2026-06-09 value).
@@ -454,20 +542,238 @@ WHEN NOT MATCHED THEN INSERT (
 -- Daily: MVRV (real date) of day D against the daily RSI row of day D. With the
 -- 1-day lag, the real value of D lives under mvrvz_date = D + 1.
 CREATE OR REPLACE VIEW `trade-390514.prod_trade_gold.vw_btc_training_daily`
-OPTIONS(description = "Daily BTC training set: date, close price, daily RSI(14) and MVRV Z-Score aligned on the same calendar date. The MVRV source lags 1 day (value of D published under mvrvz_date D+1), so the join shifts +1 day. Read-only join of silver.rsi_features (1d) and bronze MVRV.")
+OPTIONS(description = "Daily BTC model-feature set (stationary features only; raw levels used internally are NOT exposed — price/labels live in silver.rsi_features). Columns: date, daily RSI(14), weekly RSI(14) as-of, MVRV Z-Score, VIX, price_vs_ema365 (price/EMA365-1), dxy_vs_ema365 (DXY/EMA365-1), realized_vol_30d, m2_yoy_log (ln M2_t/M2_{t-52w}), m2_roc_13w_ann ((M2_t/M2_{t-13w})^(52/13)-1), teny_chg_30d (DGS10 30-day change), the 10Y-2Y spread (+1-month change +dis-inversion flag), and BTC halving-cycle features (cycle_phase + sin/cos + annualised issuance). MVRV is on the same calendar date (its source lags 1 day, join +1). Macro/weekly-RSI are point-in-time as-of the trading day (latest value known on/before D; M2 via the vintage current at D, incl. the -52w/-13w lookbacks; weekly RSI only for weeks already closed), so no look-ahead. The EMA(365) is an exact closed-form EMA; realized_vol_30d = stddev of the last 30 daily log-returns x sqrt(365); cycle_phase = block fraction through the current halving epoch (epoch fixed by date, supply from Coin Metrics); issuance_rate_ann = 52560 x block_subsidy / circulating_supply. Read-only join of silver.rsi_features (1d/1w) with bronze MVRV, the macro tables and BTC supply.")
 AS
+WITH btc AS (
+  SELECT DATE(r.time_period_start) AS d, r.price_close, r.rsi
+  FROM `trade-390514.prod_trade_silver.rsi_features` AS r
+  WHERE r.symbol = 'BTCUSD' AND r.temporality = '1d'
+    AND r.rsi_period = 14 AND r.rsi IS NOT NULL          -- drop the 14-day warm-up
+),
+-- Full daily close series (incl. warm-up) for the recursive/windowed features
+-- (EMA365, realised vol). i is the 0-based row index used by the EMA closed form.
+px AS (
+  SELECT
+    DATE(r.time_period_start) AS d,
+    r.price_close,
+    ROW_NUMBER() OVER (ORDER BY r.time_period_start) - 1 AS i
+  FROM `trade-390514.prod_trade_silver.rsi_features` AS r
+  WHERE r.symbol = 'BTCUSD' AND r.temporality = '1d' AND r.rsi_period = 14
+),
+px_calc AS (
+  SELECT
+    d,
+    -- Realised volatility: stddev of the last 30 daily LOG-returns, annualised
+    -- x sqrt(365). Log-returns r_t = ln(P_t / P_{t-1}) (additive, symmetric).
+    -- WARM-UP: NULL until the full 30-return window exists (i >= 30) — a stddev of
+    -- 2-3 returns is noise; same NULL-during-warm-up policy as the RSI.
+    IF(i >= 30,
+       STDDEV_SAMP(logret) OVER (ORDER BY d ROWS BETWEEN 29 PRECEDING AND CURRENT ROW)
+         * SQRT(365),
+       NULL) AS realized_vol_30d,
+    -- EMA(365) of close, EXACT recursive EMA in a single pass via its closed form.
+    -- With alpha = 2/366, beta = 1-alpha and L = ln(beta): EMA_j = beta^j * (V_j +
+    -- beta*P_0) where V_j = alpha * sum_{m<=j} beta^{-m} P_m. beta^{-m} = exp(-m L)
+    -- (L<0) is large for old rows but beta^j = exp(j L) rescales it back; float64
+    -- holds the range comfortably for BTC's history.
+    -- WARM-UP: NULL for the first 365 rows (i < 365) — a 365-day EMA is not an
+    -- annual trend yet, so it is suppressed like the RSI warm-up.
+    IF(i >= 365,
+       EXP(i * LN(1 - 2/366)) * (
+         (2/366) * SUM(EXP(-i * LN(1 - 2/366)) * price_close) OVER (ORDER BY d)
+         + (1 - 2/366) * FIRST_VALUE(price_close) OVER (ORDER BY d)
+       ),
+       NULL) AS ema365
+  FROM (
+    SELECT d, i, price_close,
+           LN(price_close / LAG(price_close) OVER (ORDER BY d)) AS logret
+    FROM px
+  )
+),
+-- DXY with its own EMA(365) (same exact closed form as the price EMA), computed
+-- over the full DXY series so the average is mature by the time BTC history starts.
+dxy_calc AS (
+  SELECT
+    dxy_date,
+    price_close AS dxy,
+    -- WARM-UP: NULL for the first 365 DXY bars (i < 365), same policy as the price
+    -- EMA. Moot in practice (DXY history starts 1971, BTC in 2011) but consistent.
+    IF(i >= 365,
+       EXP(i * LN(1 - 2/366)) * (
+         (2/366) * SUM(EXP(-i * LN(1 - 2/366)) * price_close) OVER (ORDER BY dxy_date)
+         + (1 - 2/366) * FIRST_VALUE(price_close) OVER (ORDER BY dxy_date)
+       ),
+       NULL) AS dxy_ema365
+  FROM (
+    SELECT dxy_date, price_close,
+           ROW_NUMBER() OVER (ORDER BY dxy_date) - 1 AS i
+    FROM `trade-390514.prod_trade_bronze.yahoo_dxy_daily_raw`
+  )
+),
+-- As-of join per macro series: for each trading day d keep the latest row with
+-- date <= d. The >= '2010-01-01' floor only bounds the scan (BTC history starts
+-- 2011-08), it does not affect the result.
+dxy_asof AS (
+  SELECT b.d, c.dxy, c.dxy_ema365
+  FROM btc b LEFT JOIN dxy_calc AS c
+    ON c.dxy_date <= b.d AND c.dxy_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY c.dxy_date DESC) = 1
+),
+vix_asof AS (
+  SELECT b.d, x.obs_value AS vix
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_bronze.fred_vixcls_daily_raw` AS x
+    ON x.obs_date <= b.d AND x.obs_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY x.obs_date DESC) = 1
+),
+dgs10_asof AS (
+  SELECT b.d, y.obs_value AS treasury_10y
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_bronze.fred_dgs10_daily_raw` AS y
+    ON y.obs_date <= b.d AND y.obs_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY y.obs_date DESC) = 1
+),
+dgs2_asof AS (
+  SELECT b.d, v.obs_value AS treasury_2y
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_bronze.fred_dgs2_daily_raw` AS v
+    ON v.obs_date <= b.d AND v.obs_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY v.obs_date DESC) = 1
+),
+-- M2 point-in-time: the vintage whose realtime window contains d, latest obs week.
+m2_asof AS (
+  SELECT b.d, w.m2_value AS m2
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_bronze.fred_wm2ns_weekly_raw` AS w
+    ON w.realtime_start <= b.d AND w.realtime_end >= b.d
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY w.wm2ns_date DESC, w.realtime_start DESC) = 1
+),
+-- M2 of ~52 weeks earlier, same vintage current at d (for the log YoY growth).
+m2_52w_asof AS (
+  SELECT b.d, w.m2_value AS m2_52w
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_bronze.fred_wm2ns_weekly_raw` AS w
+    ON w.realtime_start <= b.d AND w.realtime_end >= b.d
+   AND w.wm2ns_date <= DATE_SUB(b.d, INTERVAL 364 DAY)
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY w.wm2ns_date DESC, w.realtime_start DESC) = 1
+),
+-- M2 of ~13 weeks earlier, same vintage current at d (for the annualised RoC).
+m2_13w_asof AS (
+  SELECT b.d, w.m2_value AS m2_13w
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_bronze.fred_wm2ns_weekly_raw` AS w
+    ON w.realtime_start <= b.d AND w.realtime_end >= b.d
+   AND w.wm2ns_date <= DATE_SUB(b.d, INTERVAL 91 DAY)
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY w.wm2ns_date DESC, w.realtime_start DESC) = 1
+),
+-- Weekly RSI(14) of the PREVIOUS week as-of d: the most recent weekly candle
+-- whose week ends strictly BEFORE the week containing d (its Monday <
+-- DATE_TRUNC(d, WEEK(MONDAY))). This excludes both the still-forming current
+-- week and the week that closes on d itself (a Sunday), so the value is the
+-- prior completed week, stable across all 7 days of the current week, with no
+-- look-ahead.
+rsi_weekly_asof AS (
+  SELECT b.d, wk.rsi AS rsi_weekly
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_silver.rsi_features` AS wk
+    ON wk.symbol = 'BTCUSD' AND wk.temporality = '1w' AND wk.rsi_period = 14
+   AND wk.rsi IS NOT NULL
+   AND DATE(wk.time_period_start) < DATE_TRUNC(b.d, WEEK(MONDAY))
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY wk.time_period_start DESC) = 1
+),
+-- BTC circulating supply as-of d (one daily value; as-of guards a missing day).
+supply_asof AS (
+  SELECT b.d, s.circ_supply
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_bronze.coinmetrics_btc_supply_daily_raw` AS s
+    ON s.supply_date <= b.d AND s.supply_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY s.supply_date DESC) = 1
+),
+-- One row per day with all as-of features, the term spread (level) and the halving
+-- epoch (fixed by date; epoch boundaries are known on-chain events).
+joined AS (
+  SELECT
+    b.d AS date,
+    b.price_close,
+    b.rsi,
+    rsi_weekly_asof.rsi_weekly,
+    m.mvrv_zscore,
+    dxy_asof.dxy,
+    dxy_asof.dxy_ema365,
+    vix_asof.vix,
+    dgs10_asof.treasury_10y,
+    dgs2_asof.treasury_2y,
+    m2_asof.m2,
+    m2_52w_asof.m2_52w,
+    m2_13w_asof.m2_13w,
+    dgs10_asof.treasury_10y - dgs2_asof.treasury_2y AS spread_10y_2y,
+    supply_asof.circ_supply,
+    CASE
+      WHEN b.d < '2012-11-28' THEN 0
+      WHEN b.d < '2016-07-09' THEN 1
+      WHEN b.d < '2020-05-11' THEN 2
+      WHEN b.d < '2024-04-20' THEN 3
+      ELSE 4
+    END AS halving_epoch
+  FROM btc b
+  JOIN `trade-390514.prod_trade_bronze.bitcoin_data_mvrv_zscore_daily_raw` AS m
+    ON m.mvrvz_date = DATE_ADD(b.d, INTERVAL 1 DAY)      -- +1: undo MVRV publication lag
+  LEFT JOIN dxy_asof         USING (d)
+  LEFT JOIN vix_asof         USING (d)
+  LEFT JOIN dgs10_asof       USING (d)
+  LEFT JOIN dgs2_asof        USING (d)
+  LEFT JOIN m2_asof          USING (d)
+  LEFT JOIN m2_52w_asof      USING (d)
+  LEFT JOIN m2_13w_asof      USING (d)
+  LEFT JOIN rsi_weekly_asof  USING (d)
+  LEFT JOIN supply_asof      USING (d)
+),
+-- Halving-cycle derivations: block subsidy = 50 / 2^epoch; cycle_phase = block
+-- fraction through the epoch = (supply - supply_at_halving) / epoch_issuance,
+-- where supply_at_halving = 21,000,000*(1 - 2^-epoch) and epoch_issuance =
+-- 210,000 * subsidy. Supply recovers the block count (the supply-vs-theoretical
+-- offset is ~200 BTC, <0.03% of a cycle).
+cyc AS (
+  SELECT
+    j.*,
+    50 / POW(2, j.halving_epoch) AS block_subsidy,
+    SAFE_DIVIDE(
+      j.circ_supply - 21000000 * (1 - POW(2, -j.halving_epoch)),
+      210000 * 50 / POW(2, j.halving_epoch)
+    ) AS cycle_phase
+  FROM joined j
+)
+-- Output = model features only (stationary). The raw levels (price_close, dxy,
+-- m2, treasuries, fed_funds, circ_supply) are used internally to derive these but
+-- are NOT exposed: levels are non-stationary and not model inputs. price/labels
+-- still live in silver.rsi_features.
 SELECT
-  DATE(r.time_period_start) AS date,
-  r.price_close,
-  r.rsi,
-  m.mvrv_zscore
-FROM `trade-390514.prod_trade_silver.rsi_features` AS r
-JOIN `trade-390514.prod_trade_bronze.bitcoin_data_mvrv_zscore_daily_raw` AS m
-  ON m.mvrvz_date = DATE_ADD(DATE(r.time_period_start), INTERVAL 1 DAY)  -- +1: undo MVRV publication lag
-WHERE r.symbol = 'BTCUSD'
-  AND r.temporality = '1d'
-  AND r.rsi_period = 14
-  AND r.rsi IS NOT NULL;          -- drop the 14-day warm-up (rsi NULL)
+  c.date,
+  c.rsi,
+  c.rsi_weekly,
+  c.mvrv_zscore,
+  c.vix,
+  -- Price vs its 365-day EMA (regime/trend), stationary ratio: price / EMA - 1.
+  SAFE_DIVIDE(c.price_close, pc.ema365) - 1 AS price_vs_ema365,
+  -- DXY vs its own 365-day EMA, same stationary deviation form.
+  SAFE_DIVIDE(c.dxy, c.dxy_ema365) - 1 AS dxy_vs_ema365,
+  -- Realised volatility: stddev of the last 30 daily log-returns x sqrt(365).
+  pc.realized_vol_30d,
+  -- M2 year-over-year growth, log: ln(M2_t / M2_{t-52w}). Point-in-time both ends.
+  SAFE.LN(c.m2 / NULLIF(c.m2_52w, 0)) AS m2_yoy_log,
+  -- M2 13-week rate of change, annualised: (M2_t / M2_{t-13w})^(52/13) - 1.
+  POW(SAFE_DIVIDE(c.m2, NULLIF(c.m2_13w, 0)), 52/13) - 1 AS m2_roc_13w_ann,
+  -- 10Y yield change over ~30 days (the change, not the level; more stationary).
+  c.treasury_10y - LAG(c.treasury_10y, 30) OVER (ORDER BY c.date) AS teny_chg_30d,
+  c.spread_10y_2y,
+  -- Change of the spread vs ~1 month ago (30 daily rows). Positive = steepening.
+  c.spread_10y_2y - LAG(c.spread_10y_2y, 30) OVER (ORDER BY c.date) AS spread_10y_2y_chg_1m,
+  -- Dis-inverting from negative: a month ago the curve was inverted (spread < 0)
+  -- and the spread has risen since. FALSE before enough history.
+  COALESCE(
+    LAG(c.spread_10y_2y, 30) OVER (ORDER BY c.date) < 0
+    AND c.spread_10y_2y > LAG(c.spread_10y_2y, 30) OVER (ORDER BY c.date),
+    FALSE
+  ) AS dis_inverting_from_neg,
+  c.cycle_phase,
+  SIN(2 * ACOS(-1) * c.cycle_phase) AS cycle_phase_sin,
+  COS(2 * ACOS(-1) * c.cycle_phase) AS cycle_phase_cos,
+  -- Annualised issuance rate: yearly new BTC / circulating supply.
+  SAFE_DIVIDE(52560 * c.block_subsidy, c.circ_supply) AS issuance_rate_ann
+FROM cyc c
+LEFT JOIN px_calc pc ON pc.d = c.date;
 
 -- Weekly: the weekly RSI row is labelled by its Monday (WEEK(MONDAY) open); it
 -- is paired with the MVRV of THAT week's Sunday (Monday + 6 days), i.e. the day
@@ -476,18 +782,93 @@ WHERE r.symbol = 'BTCUSD'
 -- mvrvz_date = Sunday + 1 = Monday + 7, so the join offset is +7 days (the
 -- exposed week_end_sunday column stays Monday + 6, the true Sunday date).
 CREATE OR REPLACE VIEW `trade-390514.prod_trade_gold.vw_btc_training_weekly`
-OPTIONS(description = "Weekly BTC training set: week (Monday open / Sunday close), weekly close price, weekly RSI(14) and the MVRV Z-Score of that week's Sunday. The MVRV source lags 1 day, so the Sunday value lives under mvrvz_date = Monday + 7; the join uses +7 days. Read-only join of silver.rsi_features (1w) and bronze MVRV.")
+OPTIONS(description = "Weekly BTC training set: week (Monday open / Sunday close), weekly close price, weekly RSI(14), the MVRV Z-Score of that week's Sunday, the macro features (DXY, 10Y Treasury, 2Y Treasury, Fed funds, M2) and the 10Y-2Y term spread with its 1-month change and a dis-inversion flag. MVRV uses the Sunday value (mvrvz_date = Monday + 7 with the 1-day lag). The macro features are aligned point-in-time as-of the week's Sunday (Monday + 6): latest value known by week close; M2 via the vintage current then. No look-ahead. spread_10y_2y = treasury_10y - treasury_2y (curve level; negative = inverted); spread_10y_2y_chg_1m is its change vs ~1 month (4 weeks) ago; dis_inverting_from_neg is TRUE when the spread was inverted 4 weeks ago and has risen since (steepening out of inversion). Read-only join of silver.rsi_features (1w) with bronze MVRV and the macro tables.")
 AS
+WITH btcw AS (
+  SELECT
+    DATE(r.time_period_start)                          AS week_start_monday,
+    DATE_ADD(DATE(r.time_period_start), INTERVAL 6 DAY) AS week_end_sunday,
+    r.price_close, r.rsi
+  FROM `trade-390514.prod_trade_silver.rsi_features` AS r
+  WHERE r.symbol = 'BTCUSD' AND r.temporality = '1w'
+    AND r.rsi_period = 14 AND r.rsi IS NOT NULL          -- drop the weekly warm-up
+),
+-- As-of the week's Sunday (week close); '2010-01-01' floor only bounds the scan.
+dxy_asof AS (
+  SELECT b.week_start_monday, x.price_close AS dxy
+  FROM btcw b LEFT JOIN `trade-390514.prod_trade_bronze.yahoo_dxy_daily_raw` AS x
+    ON x.dxy_date <= b.week_end_sunday AND x.dxy_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.week_start_monday ORDER BY x.dxy_date DESC) = 1
+),
+dgs10_asof AS (
+  SELECT b.week_start_monday, y.obs_value AS treasury_10y
+  FROM btcw b LEFT JOIN `trade-390514.prod_trade_bronze.fred_dgs10_daily_raw` AS y
+    ON y.obs_date <= b.week_end_sunday AND y.obs_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.week_start_monday ORDER BY y.obs_date DESC) = 1
+),
+dgs2_asof AS (
+  SELECT b.week_start_monday, v.obs_value AS treasury_2y
+  FROM btcw b LEFT JOIN `trade-390514.prod_trade_bronze.fred_dgs2_daily_raw` AS v
+    ON v.obs_date <= b.week_end_sunday AND v.obs_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.week_start_monday ORDER BY v.obs_date DESC) = 1
+),
+dff_asof AS (
+  SELECT b.week_start_monday, z.obs_value AS fed_funds
+  FROM btcw b LEFT JOIN `trade-390514.prod_trade_bronze.fred_dff_daily_raw` AS z
+    ON z.obs_date <= b.week_end_sunday AND z.obs_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.week_start_monday ORDER BY z.obs_date DESC) = 1
+),
+-- M2 point-in-time: the vintage whose realtime window contains the Sunday.
+m2_asof AS (
+  SELECT b.week_start_monday, w.m2_value AS m2
+  FROM btcw b LEFT JOIN `trade-390514.prod_trade_bronze.fred_wm2ns_weekly_raw` AS w
+    ON w.realtime_start <= b.week_end_sunday AND w.realtime_end >= b.week_end_sunday
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.week_start_monday ORDER BY w.wm2ns_date DESC, w.realtime_start DESC) = 1
+),
+-- One row per week with the as-of features and the term spread (level). The spread
+-- momentum and the dis-inversion flag are derived in the outer SELECT (window over
+-- this row set, ordered by week).
+joined AS (
+  SELECT
+    b.week_start_monday,
+    b.week_end_sunday,
+    b.price_close,
+    b.rsi,
+    m.mvrv_zscore,
+    dxy_asof.dxy,
+    dgs10_asof.treasury_10y,
+    dgs2_asof.treasury_2y,
+    dff_asof.fed_funds,
+    m2_asof.m2,
+    dgs10_asof.treasury_10y - dgs2_asof.treasury_2y AS spread_10y_2y
+  FROM btcw b
+  JOIN `trade-390514.prod_trade_bronze.bitcoin_data_mvrv_zscore_daily_raw` AS m
+    ON m.mvrvz_date = DATE_ADD(b.week_start_monday, INTERVAL 7 DAY)  -- +7: Sunday(+6) plus the 1-day lag
+  LEFT JOIN dxy_asof   USING (week_start_monday)
+  LEFT JOIN dgs10_asof USING (week_start_monday)
+  LEFT JOIN dgs2_asof  USING (week_start_monday)
+  LEFT JOIN dff_asof   USING (week_start_monday)
+  LEFT JOIN m2_asof    USING (week_start_monday)
+)
 SELECT
-  DATE(r.time_period_start)                          AS week_start_monday,
-  DATE_ADD(DATE(r.time_period_start), INTERVAL 6 DAY) AS week_end_sunday,
-  r.price_close,
-  r.rsi,
-  m.mvrv_zscore
-FROM `trade-390514.prod_trade_silver.rsi_features` AS r
-JOIN `trade-390514.prod_trade_bronze.bitcoin_data_mvrv_zscore_daily_raw` AS m
-  ON m.mvrvz_date = DATE_ADD(DATE(r.time_period_start), INTERVAL 7 DAY)  -- +7: Sunday(+6) plus the 1-day lag
-WHERE r.symbol = 'BTCUSD'
-  AND r.temporality = '1w'
-  AND r.rsi_period = 14
-  AND r.rsi IS NOT NULL;          -- drop the weekly warm-up (rsi NULL)
+  j.week_start_monday,
+  j.week_end_sunday,
+  j.price_close,
+  j.rsi,
+  j.mvrv_zscore,
+  j.dxy,
+  j.treasury_10y,
+  j.treasury_2y,
+  j.fed_funds,
+  j.m2,
+  j.spread_10y_2y,
+  -- Change of the spread vs ~1 month ago (4 weekly rows). Positive = steepening.
+  j.spread_10y_2y - LAG(j.spread_10y_2y, 4) OVER (ORDER BY j.week_start_monday) AS spread_10y_2y_chg_1m,
+  -- Dis-inverting from negative: 4 weeks ago the curve was inverted (spread < 0)
+  -- and the spread has risen since. FALSE before enough history.
+  COALESCE(
+    LAG(j.spread_10y_2y, 4) OVER (ORDER BY j.week_start_monday) < 0
+    AND j.spread_10y_2y > LAG(j.spread_10y_2y, 4) OVER (ORDER BY j.week_start_monday),
+    FALSE
+  ) AS dis_inverting_from_neg
+FROM joined j;

@@ -314,7 +314,8 @@ class TestDdlContract:
 
 
 # ---------------------------------------------------------------------------
-# Training views — daily (same-date) and weekly (Sunday MVRV vs Monday RSI)
+# Training views — daily (same-date) and weekly (Sunday MVRV vs Monday RSI),
+# plus the point-in-time as-of macro features (DXY, 10Y, Fed funds, M2)
 # ---------------------------------------------------------------------------
 
 class TestTrainingViews:
@@ -337,7 +338,7 @@ class TestTrainingViews:
     def test_daily_joins_with_one_day_lag_shift(self, daily):
         # MVRV publishes day D-1 under mvrvz_date D, so the real value of trading
         # day D lives under mvrvz_date = D + 1 -> the join shifts +1 day.
-        assert "m.mvrvz_date = DATE_ADD(DATE(r.time_period_start), INTERVAL 1 DAY)" in daily
+        assert "m.mvrvz_date = DATE_ADD(b.d, INTERVAL 1 DAY)" in daily
 
     def test_daily_filters_and_columns(self, daily):
         assert "r.temporality = '1d'" in daily
@@ -348,7 +349,7 @@ class TestTrainingViews:
     def test_weekly_crosses_sunday_mvrv_vs_monday_rsi_with_lag(self, weekly):
         # The week's Sunday is Monday + 6; with the 1-day MVRV lag the Sunday
         # value lives under mvrvz_date = Monday + 7, so the join offset is +7.
-        assert "m.mvrvz_date = DATE_ADD(DATE(r.time_period_start), INTERVAL 7 DAY)" in weekly
+        assert "m.mvrvz_date = DATE_ADD(b.week_start_monday, INTERVAL 7 DAY)" in weekly
 
     def test_weekly_exposes_monday_and_sunday(self, weekly):
         assert "AS week_start_monday" in weekly
@@ -364,3 +365,145 @@ class TestTrainingViews:
         # The weekly view must NOT re-truncate weeks itself; it relies on
         # rsi_features already being WEEK(MONDAY)-aligned and just offsets +6 days.
         assert "WEEK(" not in weekly
+
+    # --- macro features (DXY, 10Y, Fed funds, M2) ---------------------------
+
+    @pytest.mark.parametrize(
+        "col",
+        ("AS dxy", "AS treasury_10y", "AS treasury_2y", "AS m2"),
+    )
+    def test_both_views_expose_macro_columns(self, daily, weekly, col):
+        # These appear in both views (as CTE-derived values; the daily view uses
+        # them internally even when they are not exposed as output columns).
+        assert col in daily
+        assert col in weekly
+
+    def test_fed_funds_is_weekly_only(self, daily, weekly):
+        # fed_funds was dropped from the daily model-feature view; weekly keeps it.
+        assert "AS fed_funds" in weekly
+        assert "AS fed_funds" not in daily
+
+    def test_daily_macro_is_asof_known_on_or_before_D(self, daily):
+        # As-of: a range-join (date <= the trading day) trimmed to the latest row
+        # with QUALIFY ROW_NUMBER, forward-filling weekend/holiday gaps. DXY is
+        # taken from its EMA-carrying CTE (alias c); DGS10 from its raw table.
+        assert "ON c.dxy_date <= b.d" in daily
+        assert "ON y.obs_date <= b.d" in daily
+        assert "ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY c.dxy_date DESC) = 1" in daily
+
+    def test_daily_m2_is_point_in_time_vintage(self, daily):
+        # M2 picks the vintage whose realtime window contains D (no look-ahead),
+        # latest observation week first.
+        assert "ON w.realtime_start <= b.d AND w.realtime_end >= b.d" in daily
+        assert "ORDER BY w.wm2ns_date DESC, w.realtime_start DESC) = 1" in daily
+
+    def test_weekly_macro_is_asof_the_sunday(self, weekly):
+        # Weekly features are as-of the week's Sunday (Monday + 6 days).
+        assert "ON x.dxy_date <= b.week_end_sunday" in weekly
+        assert "ON w.realtime_start <= b.week_end_sunday AND w.realtime_end >= b.week_end_sunday" in weekly
+
+    # --- 2Y Treasury + 10Y-2Y term spread, change and dis-inversion flag -----
+
+    def test_daily_2y_is_asof_known_on_or_before_D(self, daily):
+        # DGS2 as-of join, same pattern as the other daily macro series.
+        assert "ON v.obs_date <= b.d" in daily
+        assert "ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY v.obs_date DESC) = 1" in daily
+
+    def test_weekly_2y_is_asof_the_sunday(self, weekly):
+        assert "ON v.obs_date <= b.week_end_sunday" in weekly
+
+    def test_spread_is_10y_minus_2y(self, daily, weekly):
+        # Curve level: negative spread = inverted.
+        spread = "dgs10_asof.treasury_10y - dgs2_asof.treasury_2y AS spread_10y_2y"
+        assert spread in daily
+        assert spread in weekly
+
+    def test_daily_spread_change_uses_one_month_lag(self, daily):
+        # ~1 month = 30 daily rows; positive change = steepening.
+        assert ("c.spread_10y_2y - LAG(c.spread_10y_2y, 30) OVER (ORDER BY c.date) "
+                "AS spread_10y_2y_chg_1m") in daily
+
+    def test_weekly_spread_change_uses_four_week_lag(self, weekly):
+        # ~1 month = 4 weekly rows.
+        assert ("j.spread_10y_2y - LAG(j.spread_10y_2y, 4) OVER (ORDER BY j.week_start_monday) "
+                "AS spread_10y_2y_chg_1m") in weekly
+
+    def test_daily_dis_inverting_flag(self, daily):
+        # TRUE when the spread was inverted a month ago and has risen since.
+        assert "AS dis_inverting_from_neg" in daily
+        assert "LAG(c.spread_10y_2y, 30) OVER (ORDER BY c.date) < 0" in daily
+
+    def test_weekly_dis_inverting_flag(self, weekly):
+        assert "AS dis_inverting_from_neg" in weekly
+        assert "LAG(j.spread_10y_2y, 4) OVER (ORDER BY j.week_start_monday) < 0" in weekly
+
+    # --- daily-only features: VIX, EMA365, weekly-RSI as-of, realised vol, ---
+    # --- M2 log YoY, halving-cycle (phase/sin/cos/issuance) ------------------
+
+    @pytest.mark.parametrize(
+        "col",
+        ("AS vix", "AS rsi_weekly", "AS price_vs_ema365", "AS dxy_vs_ema365",
+         "AS realized_vol_30d", "AS m2_yoy_log", "AS m2_roc_13w_ann", "AS teny_chg_30d",
+         "AS cycle_phase", "AS cycle_phase_sin", "AS cycle_phase_cos", "AS issuance_rate_ann"),
+    )
+    def test_daily_exposes_new_feature_columns(self, daily, col):
+        assert col in daily
+
+    def test_price_vs_ema365_is_ratio_minus_one(self, daily):
+        assert "SAFE_DIVIDE(c.price_close, pc.ema365) - 1 AS price_vs_ema365" in daily
+
+    def test_dxy_vs_ema365_uses_dxy_own_ema(self, daily):
+        assert "AS dxy_ema365" in daily
+        assert "SAFE_DIVIDE(c.dxy, c.dxy_ema365) - 1 AS dxy_vs_ema365" in daily
+
+    def test_m2_roc_13w_annualised(self, daily):
+        assert "w.wm2ns_date <= DATE_SUB(b.d, INTERVAL 91 DAY)" in daily
+        assert "POW(SAFE_DIVIDE(c.m2, NULLIF(c.m2_13w, 0)), 52/13) - 1 AS m2_roc_13w_ann" in daily
+
+    def test_teny_chg_30d_is_level_change(self, daily):
+        assert "c.treasury_10y - LAG(c.treasury_10y, 30) OVER (ORDER BY c.date) AS teny_chg_30d" in daily
+
+    def test_vix_is_asof_from_vixcls(self, daily):
+        assert "fred_vixcls_daily_raw` AS x" in daily
+        assert "x.obs_value AS vix" in daily
+
+    def test_weekly_rsi_asof_uses_previous_week(self, daily):
+        # The weekly RSI is the PREVIOUS week's: the most recent week ending
+        # strictly before the week containing d (its Monday < d's Monday). This
+        # excludes the still-forming current week and the week closing on d (a
+        # Sunday), so the value is stable across the whole week with no look-ahead.
+        assert "wk.temporality = '1w'" in daily
+        assert "DATE(wk.time_period_start) < DATE_TRUNC(b.d, WEEK(MONDAY))" in daily
+        assert "wk.rsi AS rsi_weekly" in daily
+
+    def test_realized_vol_is_std_of_30_log_returns_annualised(self, daily):
+        assert "LN(price_close / LAG(price_close) OVER (ORDER BY d)) AS logret" in daily
+        assert ("STDDEV_SAMP(logret) OVER (ORDER BY d ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) "
+                "* SQRT(365)") in daily
+        assert "IF(i >= 30," in daily          # full-window warm-up NULL (like RSI)
+        assert "AS realized_vol_30d" in daily
+
+    def test_ema365_is_closed_form_exact(self, daily):
+        # alpha = 2/366; closed-form recursive EMA in one pass.
+        assert "EXP(i * LN(1 - 2/366)) *" in daily
+        assert "SUM(EXP(-i * LN(1 - 2/366)) * price_close) OVER (ORDER BY d)" in daily
+
+    def test_ema365_warmup_nulls_first_365_rows(self, daily):
+        # NULL until 365 rows of EMA history, consistent with the RSI warm-up.
+        assert "IF(i >= 365," in daily
+
+    def test_m2_yoy_log_and_52w_lag(self, daily):
+        assert "w.wm2ns_date <= DATE_SUB(b.d, INTERVAL 364 DAY)" in daily
+        assert "SAFE.LN(c.m2 / NULLIF(c.m2_52w, 0)) AS m2_yoy_log" in daily
+
+    def test_cycle_phase_from_supply_and_epoch(self, daily):
+        # Epoch fixed by date; cycle_phase = block fraction from circulating supply.
+        assert "s.supply_date <= b.d" in daily
+        assert "WHEN b.d < '2024-04-20' THEN 3" in daily
+        assert "50 / POW(2, j.halving_epoch) AS block_subsidy" in daily
+        assert "21000000 * (1 - POW(2, -j.halving_epoch))" in daily
+
+    def test_cycle_sin_cos_and_issuance(self, daily):
+        assert "SIN(2 * ACOS(-1) * c.cycle_phase) AS cycle_phase_sin" in daily
+        assert "COS(2 * ACOS(-1) * c.cycle_phase) AS cycle_phase_cos" in daily
+        assert "SAFE_DIVIDE(52560 * c.block_subsidy, c.circ_supply) AS issuance_rate_ann" in daily

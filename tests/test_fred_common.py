@@ -1,5 +1,6 @@
 """Unit tests for the shared FRED ingest logic (``airflow/ingest/fred_common.py``)
-and its thin plain-series entry-points (``fred_10y_ingest``, ``fred_fedfunds_ingest``).
+and its thin plain-series entry-points (``fred_10y_ingest``, ``fred_fedfunds_ingest``,
+``fred_2y_ingest``).
 
 Covers the pure logic — observations parsing, ``.`` -> NULL handling, row
 building (parameterised by source id), the alert-and-drop missing policy, MERGE
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from airflow.ingest import fred_10y_ingest, fred_fedfunds_ingest
+from airflow.ingest import fred_2y_ingest, fred_10y_ingest, fred_fedfunds_ingest, fred_vix_ingest
 from airflow.ingest.fred_common import (
     _MERGE_SQL,
     FredSeries,
@@ -245,8 +246,16 @@ class TestEntryPointConfig:
         s = fred_fedfunds_ingest.SERIES
         assert (s.series_id, s.table, s.source_id) == ("DFF", "fred_dff_daily_raw", 9)
 
+    def test_2y_is_dgs2_source_10(self):
+        s = fred_2y_ingest.SERIES
+        assert (s.series_id, s.table, s.source_id) == ("DGS2", "fred_dgs2_daily_raw", 10)
+
+    def test_vix_is_vixcls_source_11(self):
+        s = fred_vix_ingest.SERIES
+        assert (s.series_id, s.table, s.source_id) == ("VIXCLS", "fred_vixcls_daily_raw", 11)
+
     def test_entry_points_expose_bound_functions(self):
-        for mod in (fred_10y_ingest, fred_fedfunds_ingest):
+        for mod in (fred_10y_ingest, fred_fedfunds_ingest, fred_2y_ingest, fred_vix_ingest):
             assert callable(mod.backfill_history)
             assert callable(mod.ingest_range)
             assert callable(mod.ingest_latest)
@@ -262,16 +271,22 @@ class TestDdlContract:
     def ddl(self):
         return _DDL_PATH.read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("table", ["fred_dgs10_daily_raw", "fred_dff_daily_raw"])
+    @pytest.mark.parametrize(
+        "table",
+        ["fred_dgs10_daily_raw", "fred_dff_daily_raw", "fred_dgs2_daily_raw",
+         "fred_vixcls_daily_raw"],
+    )
     def test_table_declared_and_partitioned(self, ddl, table):
         assert f"prod_trade_bronze.{table}" in ddl
         block = ddl.split(table, 1)[1]
-        # Monthly granularity: DGS10 (1962) / DFF (1954) exceed BigQuery's
-        # 10000-partitions-per-table limit at daily granularity.
+        # Monthly granularity: DGS10 (1962) / DFF (1954) / DGS2 (1976) / VIXCLS
+        # (1990) — long daily series partitioned by month for consistency.
         assert "PARTITION BY DATE_TRUNC(obs_date, MONTH)" in block
         assert "PRIMARY KEY (obs_date) NOT ENFORCED" in block
 
-    def test_sources_8_and_9_registered(self, ddl):
+    def test_sources_8_through_11_registered(self, ddl):
         assert "SELECT 8 AS source_id" in ddl
         assert "SELECT 9 AS source_id" in ddl
-        assert "DGS10" in ddl and "DFF" in ddl
+        assert "SELECT 10 AS source_id" in ddl
+        assert "SELECT 11 AS source_id" in ddl
+        assert "DGS10" in ddl and "DFF" in ddl and "DGS2" in ddl and "VIXCLS" in ddl
