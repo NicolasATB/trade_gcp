@@ -1,5 +1,5 @@
 """Unit tests for the Coin Metrics BTC circulating-supply ingest
-(``airflow/ingest/coinmetrics_btc_supply_ingest.py``).
+(``orchestration/ingest/coinmetrics_btc_supply_ingest.py``).
 
 Covers the pure logic — metrics parsing, ``NaN``/empty -> NULL, pure row mapping
 (no fabrication), the alert-and-skip missing policy, the query-URL builder, MERGE
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from airflow.ingest.coinmetrics_btc_supply_ingest import (
+from orchestration.ingest.coinmetrics_btc_supply_ingest import (
     _MERGE_SQL,
     _alert_missing,
     _build_row,

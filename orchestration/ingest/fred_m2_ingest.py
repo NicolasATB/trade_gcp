@@ -31,8 +31,8 @@ Authentication: ``FRED_API_KEY`` (env, never committed) for FRED; Application
 Default Credentials for BigQuery.
 
 Run standalone:
-  python -m airflow.ingest.fred_m2_ingest --backfill          # full vintage history
-  python -m airflow.ingest.fred_m2_ingest                     # recent vintages (daily)
+  python -m orchestration.ingest.fred_m2_ingest --backfill          # full vintage history
+  python -m orchestration.ingest.fred_m2_ingest                     # recent vintages (daily)
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from google.cloud import bigquery
 
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     _chunked,
     _parse_value,
     _to_date,

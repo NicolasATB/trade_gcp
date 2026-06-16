@@ -74,7 +74,7 @@ and the job executes on managed GCP workers.
 ## Daily data flow
 
 1. **Airflow scheduler** (on the VM) fires the DAG according to its daily cron.
-2. **Ingest — `PythonOperator`:** runs `airflow/ingest/binance_btc_ingest.py`,
+2. **Ingest — `PythonOperator`:** runs `orchestration/ingest/binance_btc_ingest.py`,
    downloads the daily BTC/USDT candle from Binance via CCXT and writes it to
    `prod_trade_bronze.binance_btcusd_daily_raw` (idempotent MERGE on
    `symbol + candle_date`).
@@ -106,7 +106,7 @@ and the job executes on managed GCP workers.
    and for each daily candle in the range applies its week's state together with
    the daily-RSI thresholds to produce BUY / SELL / NEUTRAL. Writes to
    `prod_trade_gold.fact_signals` with a `trigger_params` JSON column.
-6. **Alert — `PythonOperator`:** runs `airflow/alerts/`, reads the latest signal
+6. **Alert — `PythonOperator`:** runs `orchestration/alerts/`, reads the latest signal
    from `fact_signals` and sends it to Telegram **only if it changed** versus the
    previous one.
 
@@ -311,7 +311,7 @@ documentation and optimizer hints only).
 
 ## Repository layout
 
-`dags/`, `ingest/` and `alerts/` live under `airflow/` because they run *inside*
+`dags/`, `ingest/` and `alerts/` live under `orchestration/` because they run *inside*
 Airflow on the VM. `dataflow/` is kept separate because it is shipped to GCP.
 
 Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
@@ -320,8 +320,15 @@ Legend: ✅ implemented · ⏳ pending · 📁 empty folder with `.gitkeep`.
 .
 ├── .gitignore                       # ✅ ignores venv, __pycache__, secrets, etc.
 ├── README.md                        # ✅ this file
-├── airflow/                         # runs INSIDE Airflow on the VM
-│   ├── docker-compose.yaml          # ✅ Airflow stack (deployment placeholder)
+├── orchestration/                         # runs INSIDE Airflow on the VM
+│   ├── docker-compose.yaml          # ✅ Airflow stack: LocalExecutor + Postgres (no Celery)
+│   ├── Dockerfile                   # ✅ Airflow 2.10.5 image + ingest deps + isolated Beam venv
+│   ├── requirements.txt             # ✅ extra deps baked into the Airflow env (+ Google provider)
+│   ├── .env.example                 # ✅ secrets/config template (real .env is git-ignored)
+│   ├── README.md                    # ✅ deployment guide (provision + bring up Airflow)
+│   ├── scripts/
+│   │   └── provision_vm.sh          # ✅ gcloud bootstrap: e2-micro VM + 2 GB swap + Docker
+│   ├── plugins/                     # 📁 Airflow plugins (empty)
 │   ├── dags/                        # 📁 daily DAG (pending)
 │   ├── ingest/
 │   │   ├── __init__.py              # ✅ re-exports ingest_daily_candles, fetch_daily_candles_range
@@ -436,9 +443,22 @@ sources of truth — assumed and documented, not an oversight.
    cd terraform_infra
    terraform init && terraform plan && terraform apply
    ```
-5. **Airflow on the VM.** Bring up Airflow with Docker Compose from `airflow/`, and
-   place the secrets (service account, Telegram token / `chat_id`) on the VM
-   securely.
+5. **Airflow on the VM.** Provision the e2-micro VM and bring up Airflow with
+   Docker Compose (`orchestration/`). The stack is trimmed to **LocalExecutor +
+   Postgres** (no Celery/Redis) to fit ~1 GB of RAM, with **2 GB of swap** added
+   by the bootstrap; Beam runs in an isolated venv so it does not clash with
+   Airflow's deps. Place the secrets (service-account key, Telegram token /
+   `chat_id`) on the VM via `.env` + a mounted `keys/sa.json` — never committed.
+   ```bash
+   cd orchestration
+   ./scripts/provision_vm.sh                  # create the VM (gcloud bootstrap)
+   # then, on the VM:
+   cp .env.example .env                        # fill in real secrets
+   docker compose build
+   docker compose up airflow-init && docker compose up -d
+   ```
+   The VM is created with `gcloud` as a bootstrap step; **T-14** codifies the same
+   VM in Terraform. See `orchestration/README.md` for the full guide.
 6. **Telegram bot.** Create the bot, obtain its token and `chat_id`, and store them
    as secrets — never in the repo.
 
@@ -462,13 +482,13 @@ sources of truth — assumed and documented, not an oversight.
   guarantee that the BigQuery `MERGE` relies on.
 - **Lint (ruff):** static analysis runs alongside the tests. A focused, high-signal
   ruleset (Pyflakes `F`, pycodestyle `E`/`W`, isort `I`) is configured in
-  `pyproject.toml`; run it with `ruff check dataflow airflow tests`.
+  `pyproject.toml`; run it with `ruff check dataflow orchestration tests`.
 - **Run locally:**
   ```bash
   pip install -r dataflow/requirements.txt \
-              -r airflow/ingest/requirements.txt \
+              -r orchestration/ingest/requirements.txt \
               -r requirements-dev.txt
-  ruff check dataflow airflow tests
+  ruff check dataflow orchestration tests
   pytest
   ```
 - **Integration tests** (`test_integration_bq.py`, marker `integration`): read-only

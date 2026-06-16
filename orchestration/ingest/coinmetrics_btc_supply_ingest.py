@@ -20,9 +20,9 @@ the Telegram alert will use) and the row is skipped. BigQuery auth is Applicatio
 Default Credentials.
 
 Run standalone:
-  python -m airflow.ingest.coinmetrics_btc_supply_ingest --backfill         # full history
-  python -m airflow.ingest.coinmetrics_btc_supply_ingest --start 2026-06-01 --end 2026-06-10
-  python -m airflow.ingest.coinmetrics_btc_supply_ingest                    # recent window (daily)
+  python -m orchestration.ingest.coinmetrics_btc_supply_ingest --backfill         # full history
+  python -m orchestration.ingest.coinmetrics_btc_supply_ingest --start 2026-06-01 --end 2026-06-10
+  python -m orchestration.ingest.coinmetrics_btc_supply_ingest                    # recent window (daily)
 """
 
 from __future__ import annotations

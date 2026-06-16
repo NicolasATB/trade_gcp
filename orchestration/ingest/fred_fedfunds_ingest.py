@@ -1,6 +1,6 @@
 """Fed funds rate ingestion: FRED DFF -> BigQuery bronze.
 
-Thin entry-point over :mod:`airflow.ingest.fred_common`: it pins the DFF config
+Thin entry-point over :mod:`orchestration.ingest.fred_common`: it pins the DFF config
 and re-exports the bound functions. DFF (Effective Federal Funds Rate, daily,
 percent, since 1954) is not revised, so it is a plain ``(obs_date, obs_value)``
 series — same code path as the 10Y Treasury (``DGS10``), only the config differs.
@@ -9,26 +9,26 @@ Authentication: ``FRED_API_KEY`` (env, never committed) for FRED; Application
 Default Credentials for BigQuery.
 
 Run standalone:
-  python -m airflow.ingest.fred_fedfunds_ingest --backfill             # full history
-  python -m airflow.ingest.fred_fedfunds_ingest --start 2026-06-01 --end 2026-06-10
-  python -m airflow.ingest.fred_fedfunds_ingest                        # recent window (daily)
+  python -m orchestration.ingest.fred_fedfunds_ingest --backfill             # full history
+  python -m orchestration.ingest.fred_fedfunds_ingest --start 2026-06-01 --end 2026-06-10
+  python -m orchestration.ingest.fred_fedfunds_ingest                        # recent window (daily)
 """
 
 from __future__ import annotations
 
 import os
 
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     FredSeries,
     run_cli,
 )
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     backfill_history as _backfill,
 )
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     ingest_latest as _ingest_latest,
 )
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     ingest_range as _ingest_range,
 )
 

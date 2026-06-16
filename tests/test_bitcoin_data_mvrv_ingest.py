@@ -1,4 +1,4 @@
-"""Unit tests for the MVRV Z-Score ingest (``airflow/ingest/bitcoin_data_mvrv_ingest.py``).
+"""Unit tests for the MVRV Z-Score ingest (``orchestration/ingest/bitcoin_data_mvrv_ingest.py``).
 
 Covers the pure logic — CSV parsing, NaN handling, the one-off value override
 (2026-06-03 -> 0.45), row building, MERGE chunking against a fake BigQuery
@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from airflow.ingest import bitcoin_data_mvrv_ingest
-from airflow.ingest.bitcoin_data_mvrv_ingest import (
+from orchestration.ingest import bitcoin_data_mvrv_ingest
+from orchestration.ingest.bitcoin_data_mvrv_ingest import (
     _MERGE_SQL,
     _alert_missing,
     _apply_corrections,

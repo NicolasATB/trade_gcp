@@ -1,4 +1,4 @@
-"""Unit tests for the shared FRED ingest logic (``airflow/ingest/fred_common.py``)
+"""Unit tests for the shared FRED ingest logic (``orchestration/ingest/fred_common.py``)
 and its thin plain-series entry-points (``fred_10y_ingest``, ``fred_fedfunds_ingest``,
 ``fred_2y_ingest``).
 
@@ -18,13 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from airflow.ingest import (
+from orchestration.ingest import (
     fred_2y_ingest,
     fred_10y_ingest,
     fred_fedfunds_ingest,
     fred_vix_ingest,
 )
-from airflow.ingest.fred_common import (
+from orchestration.ingest.fred_common import (
     _MERGE_SQL,
     FredSeries,
     _alert_missing,

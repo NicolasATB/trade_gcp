@@ -1,0 +1,19 @@
+# Extra Python dependencies baked into the Airflow image (see Dockerfile),
+# installed into Airflow's own environment.
+#
+# The ingest tasks run as PythonOperators inside this image and import
+# orchestration.ingest.*, so they need the same libraries as
+# orchestration/ingest/requirements.txt. The Google provider gives the DAG
+# (T-12) the Dataflow/Beam operators.
+#
+# NOTE: apache-beam is deliberately NOT here — it lives in the isolated
+# /opt/beam-venv (see Dockerfile) to avoid clashing with Airflow's pins.
+
+# --- ingest tasks (mirror of orchestration/ingest/requirements.txt) ---
+ccxt>=4.3
+google-cloud-bigquery>=3.20
+tenacity>=8.2
+requests>=2.31
+
+# --- Airflow GCP provider (Dataflow/Beam operators for T-12) ---
+apache-airflow-providers-google>=10.0

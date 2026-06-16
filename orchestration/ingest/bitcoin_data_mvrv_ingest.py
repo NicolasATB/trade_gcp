@@ -32,9 +32,9 @@ everywhere (local ``gcloud auth application-default login`` or
 ``GOOGLE_APPLICATION_CREDENTIALS``; on the VM/CI the attached service account).
 
 Run standalone:
-  python -m airflow.ingest.bitcoin_data_mvrv_ingest --backfill          # full history (CSV)
-  python -m airflow.ingest.bitcoin_data_mvrv_ingest --start 2026-06-01 --end 2026-06-10  # API range
-  python -m airflow.ingest.bitcoin_data_mvrv_ingest                     # latest day (daily job)
+  python -m orchestration.ingest.bitcoin_data_mvrv_ingest --backfill          # full history (CSV)
+  python -m orchestration.ingest.bitcoin_data_mvrv_ingest --start 2026-06-01 --end 2026-06-10  # API range
+  python -m orchestration.ingest.bitcoin_data_mvrv_ingest                     # latest day (daily job)
 """
 
 from __future__ import annotations

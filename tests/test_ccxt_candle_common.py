@@ -1,5 +1,5 @@
 """Unit tests for the shared CCXT candle ingest
-(``airflow/ingest/ccxt_candle_common.py``) and its thin exchange entry-points
+(``orchestration/ingest/ccxt_candle_common.py``) and its thin exchange entry-points
 (``binance_btc_ingest``, ``bitstamp_btc_ingest``).
 
 Covers the pure logic — row building (parameterised by the exchange config),
@@ -17,9 +17,9 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-import airflow.ingest as ingest_pkg
-from airflow.ingest import binance_btc_ingest, bitstamp_btc_ingest
-from airflow.ingest.ccxt_candle_common import (
+import orchestration.ingest as ingest_pkg
+from orchestration.ingest import binance_btc_ingest, bitstamp_btc_ingest
+from orchestration.ingest.ccxt_candle_common import (
     CcxtCandleSource,
     _build_row,
     _day_start_ms,
@@ -190,6 +190,6 @@ class TestEntryPointConfig:
             assert callable(mod.main)
 
     def test_package_reexports_binance(self):
-        # Public API preserved for the (pending) DAG: airflow.ingest.<fn>.
+        # Public API preserved for the (pending) DAG: orchestration.ingest.<fn>.
         assert ingest_pkg.ingest_daily_candles is binance_btc_ingest.ingest_daily_candles
         assert ingest_pkg.fetch_daily_candles_range is binance_btc_ingest.fetch_daily_candles_range

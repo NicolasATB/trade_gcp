@@ -1,0 +1,131 @@
+# Minimal Airflow stack for the e2-micro orchestration VM (T-11).
+#
+# Trimmed down from the official Airflow docker-compose to fit ~1 GB of RAM:
+# LocalExecutor + Postgres only. NO Redis / Celery worker / Flower / triggerer.
+# The daily DAG (T-12) runs a once-a-day pipeline, so a single scheduler that
+# executes tasks in-process (LocalExecutor) is plenty.
+#
+# Build context is the repo root (..) so the image can install both
+# orchestration/requirements.txt and dataflow/requirements.txt. The whole repo
+# is mounted read-only at /opt/airflow/repo and put on PYTHONPATH, so the DAG
+# can `import orchestration.ingest.*` and launch `dataflow.pipeline`.
+#
+# Usage:
+#   cp .env.example .env            # then fill in the real secrets
+#   docker compose build
+#   docker compose up airflow-init  # one-shot: db migrate + create admin user
+#   docker compose up -d            # scheduler + webserver
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: orchestration/Dockerfile
+  image: trade-gcp/airflow:2.10.5
+  env_file:
+    - .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'false'
+    # Keep the footprint small on a tiny VM.
+    AIRFLOW__CORE__PARALLELISM: '4'
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '2'
+    AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: '1'
+    AIRFLOW__SCHEDULER__PARSING_PROCESSES: '1'
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: '60'
+    # Expose the scheduler's HTTP health endpoint on :8974 (the healthcheck below
+    # hits it); without this the port stays closed and the container looks
+    # unhealthy even though the scheduler is running fine.
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Make the project packages importable and the Dataflow launcher reachable.
+    PYTHONPATH: /opt/airflow/repo
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/keys/sa.json
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./keys:/opt/airflow/keys:ro
+    - ..:/opt/airflow/repo:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: 300m
+
+  # One-shot initializer: applies DB migrations and creates the admin user from
+  # the _AIRFLOW_WWW_USER_* env vars. Exits when done.
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-admin}" \
+          --firstname admin --lastname admin --role Admin \
+          --email admin@example.com || true
+    restart: on-failure
+    mem_limit: 512m
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    mem_limit: 800m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      # Bind to localhost only — reach the UI through an SSH/IAP tunnel, never
+      # expose 8080 to the internet (see orchestration/README.md).
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    mem_limit: 800m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
