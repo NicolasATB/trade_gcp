@@ -14,7 +14,9 @@ the ingest tasks (`ingest/`) and the alert task (`alerts/`, T-10). Dataflow is
 | `.env.example`       | Secrets/config template — copy to `.env` on the VM.            |
 | `scripts/provision_vm.sh` | gcloud bootstrap: create the VM, swap and Docker.         |
 | `ingest/`            | Ingestion modules (imported as `orchestration.ingest.*`).      |
-| `dags/`, `alerts/`   | DAG and alert client (T-12 / T-10).                            |
+| `dags/`              | The daily DAG `daily_btc_signal` (T-12).                        |
+| `pipeline_launch.py` | Airflow-free helpers for the DAG (launch command + ingest steps). |
+| `alerts/`            | Telegram alert client (T-10, pending).                         |
 
 ## Design notes
 
@@ -33,6 +35,44 @@ the ingest tasks (`ingest/`) and the alert task (`alerts/`, T-10). Dataflow is
 - **Secrets never in git.** The service-account key (`keys/sa.json`) and `.env`
   are git-ignored and live only on the VM. Migrating them to Secret Manager is
   tracked as T-13.
+
+## Daily DAG — `daily_btc_signal` (T-12)
+
+One DAG runs the whole pipeline once a day at **12:00 UTC** (`catchup=False`,
+`max_active_runs=1`). It processes `{{ ds }}` — yesterday's fully closed candle —
+in three phases:
+
+1. **Ingest** — one `PythonOperator` per series (Binance BTC, MVRV, DXY, 10Y, 2Y,
+   Fed funds, VIX, M2, supply), reusing `orchestration.ingest.*`. They fan out in
+   parallel; the compose caps it to two at a time (`MAX_ACTIVE_TASKS_PER_DAG=2`),
+   which suits 1 GB of RAM. Bitstamp is excluded — it is pre-2017 history, not a
+   daily source.
+2. **Launch Dataflow** — a `BashOperator` runs
+   `cd /opt/airflow/repo && /opt/beam-venv/bin/python -m dataflow.pipeline
+   --runner DataflowRunner --setup_file ./setup.py … --start_date {{ ds }}
+   --end_date {{ ds }}` in the isolated Beam venv. The MERGE-based stages make the
+   run idempotent (single re-launch is safe).
+3. **Signal alert** — a `PythonOperator` (stub today; wired to Telegram in T-10).
+
+**Retries & failure alert:** `default_args` set `retries=2` with exponential
+backoff (5→30 min) and a per-task `execution_timeout`; an `on_failure_callback`
+fires the failure alert (stub today, Telegram in T-10).
+
+The launch command and the ingest step list live in the Airflow-free
+`orchestration/pipeline_launch.py` so they are unit-tested in CI.
+
+The bucket, project, region and service account are read from `.env`
+(`DATAFLOW_TEMP_LOCATION`, `DATAFLOW_STAGING_LOCATION`, `DATAFLOW_SERVICE_ACCOUNT`,
+`GCP_PROJECT`, `GCP_REGION`), with module defaults matching the Dataflow runs.
+
+Verify on the VM after deploy:
+
+```bash
+docker compose exec airflow-scheduler airflow dags list-import-errors   # must be empty
+docker compose exec airflow-scheduler airflow tasks test daily_btc_signal ingest_binance_btc 2026-06-15
+docker compose exec airflow-scheduler airflow tasks test daily_btc_signal launch_dataflow   2026-06-15
+docker compose exec airflow-scheduler airflow dags trigger daily_btc_signal
+```
 
 ## Deploy
 
