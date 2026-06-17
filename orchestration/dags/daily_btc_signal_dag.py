@@ -1,0 +1,110 @@
+"""daily_btc_signal — daily orchestration DAG (T-12).
+
+Flow:  ingest (9 series, in parallel)  →  launch Dataflow pipeline  →  signal alert.
+
+Runs once a day at 12:00 UTC on the e2-micro Airflow VM (T-11, LocalExecutor +
+Postgres). The compose caps concurrency (``MAX_ACTIVE_TASKS_PER_DAG=2``), so the
+ingest fan-out runs two at a time — fine on 1 GB of RAM. The pipeline launch
+shells out to the isolated ``/opt/beam-venv`` interpreter (apache-beam's pins
+clash with the Airflow environment) and submits a DataflowRunner job.
+
+The logical date ``{{ ds }}`` (= yesterday's fully closed candle when the DAG
+fires at 12:00 UTC) is the single day processed end to end.
+
+The alert tasks (signal alert + failure callback) are stubs until the Telegram
+client lands in T-10; they log for now and will call ``orchestration.alerts`` then.
+
+Pure logic (the launch command, the ingest step list) lives in the Airflow-free
+``orchestration.pipeline_launch`` module so it is unit-tested in CI.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import timedelta
+
+import pendulum
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.operators.python import PythonOperator
+
+from orchestration.pipeline_launch import INGEST_STEPS, build_dataflow_command
+
+logger = logging.getLogger(__name__)
+
+
+def _alert_on_failure(context):
+    """Failure-alert stub — wire Telegram in T-10."""
+    ti = context.get("task_instance")
+    dag = context.get("dag")
+    logger.error(
+        "TASK FAILED dag=%s task=%s ds=%s (failure-alert stub; wire Telegram in T-10)",
+        dag.dag_id if dag else "?",
+        ti.task_id if ti else "?",
+        context.get("ds"),
+    )
+
+
+def _signal_alert(**context):
+    """Signal-alert stub.
+
+    In T-10 this reads the day's row from ``prod_trade_gold.fact_signals`` and
+    sends it to Telegram only when the signal changed.
+    """
+    logger.info(
+        "signal-alert stub for ds=%s — wire orchestration.alerts (T-10)",
+        context.get("ds"),
+    )
+
+
+def _make_ingest_callable(fn):
+    """Adapt a pipeline_launch ingest wrapper to an Airflow python_callable."""
+
+    def _run(**context):
+        fn(ds=context.get("ds"))
+
+    return _run
+
+
+default_args = {
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
+    "execution_timeout": timedelta(minutes=20),
+    "on_failure_callback": _alert_on_failure,
+}
+
+with DAG(
+    dag_id="daily_btc_signal",
+    description="Daily BTC RSI signal: ingest → Dataflow → alert.",
+    schedule="0 12 * * *",
+    start_date=pendulum.datetime(2026, 6, 1, tz="UTC"),
+    catchup=False,
+    max_active_runs=1,
+    default_args=default_args,
+    tags=["trade", "btc", "rsi"],
+) as dag:
+    ingest_tasks = [
+        PythonOperator(task_id=task_id, python_callable=_make_ingest_callable(fn))
+        for task_id, fn in INGEST_STEPS
+    ]
+
+    # Launch the medallion pipeline on Dataflow with the isolated Beam venv.
+    # cd into the repo root so the relative --setup_file ./setup.py resolves.
+    launch_dataflow = BashOperator(
+        task_id="launch_dataflow",
+        bash_command=(
+            "cd /opt/airflow/repo && "
+            + " ".join(build_dataflow_command("{{ ds }}"))
+        ),
+        execution_timeout=timedelta(minutes=40),
+        retries=1,  # MERGE is idempotent, so a single re-launch is safe.
+    )
+
+    signal_alert = PythonOperator(
+        task_id="signal_alert",
+        python_callable=_signal_alert,
+    )
+
+    ingest_tasks >> launch_dataflow >> signal_alert
