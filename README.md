@@ -144,21 +144,33 @@ documentation/optimizer hints only).
 priority 3) and `bitstamp_btcusd_daily_raw` (Bitstamp pre-Binance history
 2011→2017-08-16, priority 4).
 
-Plus **non-candle context series** (one value per date, own table, `priority NULL`,
-never feed `conform`; long daily series partition **monthly** to stay under the
-10000-partitions-per-table cap). Each has a full-history `--backfill` + daily
-update and **never fabricates a value** (a gap is alerted and skipped):
+Plus **non-candle context series** (one value per date — per week for Google
+Trends; own table, `priority NULL`, never feed `conform`; long daily series
+partition **monthly** to stay under the 10000-partitions-per-table cap). Each has a
+full-history `--backfill` + daily update and **never fabricates a value** (a gap is
+alerted and skipped):
 
-| Table                                | Series                  | Source            | id |
-|--------------------------------------|-------------------------|-------------------|----|
-| `bitcoin_data_mvrv_zscore_daily_raw` | MVRV Z-Score            | bitcoin-data.com  | 5  |
-| `yahoo_dxy_daily_raw`                | DXY (ICE dollar index)  | Yahoo Finance     | 6  |
-| `fred_wm2ns_weekly_raw`              | M2 (PIT vintages)       | FRED / ALFRED     | 7  |
-| `fred_dgs10_daily_raw`               | 10Y Treasury yield      | FRED              | 8  |
-| `fred_dff_daily_raw`                 | Fed funds rate          | FRED              | 9  |
-| `fred_dgs2_daily_raw`                | 2Y Treasury yield       | FRED              | 10 |
-| `fred_vixcls_daily_raw`              | VIX                     | FRED              | 11 |
-| `coinmetrics_btc_supply_daily_raw`   | BTC circulating supply  | Coin Metrics      | 12 |
+| Table                                       | Series                       | Source            | id |
+|---------------------------------------------|------------------------------|-------------------|----|
+| `bitcoin_data_mvrv_zscore_daily_raw`        | MVRV Z-Score                 | bitcoin-data.com  | 5  |
+| `yahoo_dxy_daily_raw`                        | DXY (ICE dollar index)       | Yahoo Finance     | 6  |
+| `fred_wm2ns_weekly_raw`                      | M2 (PIT vintages)            | FRED / ALFRED     | 7  |
+| `fred_dgs10_daily_raw`                       | 10Y Treasury yield           | FRED              | 8  |
+| `fred_dff_daily_raw`                         | Fed funds rate               | FRED              | 9  |
+| `fred_dgs2_daily_raw`                        | 2Y Treasury yield            | FRED              | 10 |
+| `fred_vixcls_daily_raw`                      | VIX                          | FRED              | 11 |
+| `coinmetrics_btc_supply_daily_raw`           | BTC circulating supply       | Coin Metrics      | 12 |
+| `coinmetrics_btc_active_addresses_daily_raw` | Active addresses (on-chain)  | Coin Metrics      | 13 |
+| `coinmetrics_btc_tx_count_daily_raw`         | Tx count (on-chain)          | Coin Metrics      | 14 |
+| `google_trends_btc_weekly_raw`               | Investor attention (weekly)  | Google Trends     | 15 |
+
+The three Coin Metrics series (supply, active addresses, tx count) share one
+`coinmetrics_common` family module. Google Trends only returns a weekly series for
+request windows under ~5 years, so bronze stores the **raw** 0-100 **per request
+window** (overlapping windows, `window_start` in the key) and the continuous
+**stitched** series is the silver view `vw_google_trends_btc_weekly` (each window
+re-scaled on its overlap, then re-normalised 0-100). Bronze stays raw — the
+transform lives downstream, the medallion rule for every source.
 
 `coinapi_btcusd_daily_raw` and `investing_btcusd_daily_raw` have DDL ready;
 ingestion is pending.
@@ -180,10 +192,17 @@ publishes `D-1` under date `D`):
   `price_vs_ema365` / `dxy_vs_ema365` (deviation from a closed-form 365-day EMA),
   `realized_vol_30d`, `m2_yoy_log` / `m2_roc_13w_ann`, `teny_chg_30d`,
   `spread_10y_2y` (+ its 1-month change and a `dis_inverting_from_neg` regime
-  flag), and halving-cycle features (`cycle_phase` + sin/cos, `issuance_rate_ann`).
-  Warm-up NULLs mirror the RSI (EMA365 needs 365 rows, vol needs 30 returns).
+  flag), halving-cycle features (`cycle_phase` + sin/cos, `issuance_rate_ann`),
+  on-chain `active_addresses_yoy_log` / `tx_count_yoy_log` (year-over-year log
+  growth of the raw counts) and `investor_attention` (weekly Google Trends, as-of
+  the prior closed week). Warm-up NULLs mirror the RSI (EMA365 needs 365 rows, vol
+  needs 30 returns).
 - `vw_btc_training_weekly` — weekly close + RSI + MVRV + macro levels + the 10Y-2Y
   spread, as-of the week's **Sunday**.
+- `vw_btc_monitor_daily` — dashboard / QA view (the Looker Studio report source):
+  the raw, comparable **levels** of the ingested series side by side (price, daily &
+  weekly RSI, MVRV, VIX, attention, Coin Metrics on-chain counts) — for eyeballing
+  what was ingested, **not** model features.
 
 Both filter `rsi_period=14` and drop the warm-up. They are views on purpose (tiny
 dataset, always fresh); freeze an experiment with `CREATE TABLE … AS SELECT`. Full
