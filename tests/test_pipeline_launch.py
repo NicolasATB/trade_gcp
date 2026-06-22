@@ -84,6 +84,9 @@ def test_ingest_steps_cover_expected_series():
         "ingest_vix",
         "ingest_m2",
         "ingest_supply",
+        "ingest_active_addresses",
+        "ingest_tx_count",
+        "ingest_trends",
     ]
     # Historical-only Bitstamp is not part of the daily run.
     assert not any("bitstamp" in tid for tid in task_ids)
@@ -111,3 +114,36 @@ def test_run_binance_btc_passes_logical_date(monkeypatch):
 
     assert captured["start_date"] == date(2026, 6, 15)
     assert captured["end_date"] == date(2026, 6, 15)
+
+
+def test_run_active_addresses_delegates_to_ingest_latest(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        pipeline_launch.coinmetrics_btc_active_addresses_ingest,
+        "ingest_latest",
+        lambda: calls.append(True),
+    )
+    pipeline_launch.run_active_addresses(ds="2026-06-15")
+    assert calls == [True]
+
+
+def test_run_tx_count_delegates_to_ingest_latest(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        pipeline_launch.coinmetrics_btc_tx_count_ingest,
+        "ingest_latest",
+        lambda: calls.append(True),
+    )
+    pipeline_launch.run_tx_count(ds="2026-06-15")
+    assert calls == [True]
+
+
+def test_run_trends_delegates_to_ingest_latest(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        pipeline_launch.google_trends_btc_ingest,
+        "ingest_latest",
+        lambda: calls.append(True),
+    )
+    pipeline_launch.run_trends(ds="2026-06-15")
+    assert calls == [True]

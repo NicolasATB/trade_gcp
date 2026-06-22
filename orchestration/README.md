@@ -43,10 +43,12 @@ One DAG runs the whole pipeline once a day at **12:00 UTC** (`catchup=False`,
 in three phases:
 
 1. **Ingest** — one `PythonOperator` per series (Binance BTC, MVRV, DXY, 10Y, 2Y,
-   Fed funds, VIX, M2, supply), reusing `orchestration.ingest.*`. They fan out in
-   parallel; the compose caps it to two at a time (`MAX_ACTIVE_TASKS_PER_DAG=2`),
-   which suits 1 GB of RAM. Bitstamp is excluded — it is pre-2017 history, not a
-   daily source.
+   Fed funds, VIX, M2, supply, active addresses, tx count, Google Trends investor
+   attention), reusing `orchestration.ingest.*`. They fan out in parallel; the
+   compose caps it to two at a time (`MAX_ACTIVE_TASKS_PER_DAG=2`), which suits 1 GB
+   of RAM. Google Trends is weekly — its step refreshes the latest window in place
+   (idempotent), so a daily firing just picks up the newest closed week. Bitstamp is
+   excluded — it is pre-2017 history, not a daily source.
 2. **Launch Dataflow** — a `BashOperator` runs
    `cd /opt/airflow/repo && /opt/beam-venv/bin/python -m dataflow.pipeline
    --runner DataflowRunner --setup_file ./setup.py … --start_date {{ ds }}

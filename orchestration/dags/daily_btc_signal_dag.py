@@ -1,6 +1,6 @@
 """daily_btc_signal — daily orchestration DAG (T-12).
 
-Flow:  ingest (9 series, in parallel)  →  launch Dataflow pipeline  →  signal alert.
+Flow:  ingest (12 series, in parallel)  →  launch Dataflow pipeline  →  signal alert.
 
 Runs once a day at 12:00 UTC on the e2-micro Airflow VM (T-11, LocalExecutor +
 Postgres). The compose caps concurrency (``MAX_ACTIVE_TASKS_PER_DAG=2``), so the
