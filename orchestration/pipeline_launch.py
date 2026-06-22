@@ -20,12 +20,15 @@ from datetime import date, datetime
 from orchestration.ingest import (
     binance_btc_ingest,
     bitcoin_data_mvrv_ingest,
+    coinmetrics_btc_active_addresses_ingest,
     coinmetrics_btc_supply_ingest,
+    coinmetrics_btc_tx_count_ingest,
     fred_2y_ingest,
     fred_10y_ingest,
     fred_fedfunds_ingest,
     fred_m2_ingest,
     fred_vix_ingest,
+    google_trends_btc_ingest,
     yahoo_dxy_ingest,
 )
 
@@ -58,7 +61,10 @@ def _to_date(ds):
 # --- Daily ingest steps -----------------------------------------------------
 # Each wrapper accepts an optional ``ds`` (the run's logical date). Only the
 # Binance candle uses it (to make a per-day re-run deterministic); the macro /
-# on-chain series use their own look-back windows and ignore it. Bitstamp is
+# on-chain / attention series use their own look-back windows and ignore it.
+# Google Trends is weekly: ``ingest_latest`` refreshes the latest <5-year window
+# in place (idempotent MERGE), so a daily firing just picks up the newest closed
+# week without re-requesting or re-stitching the whole history. Bitstamp is
 # deliberately absent: it is pre-2017 history (one-off back-fill), not a daily
 # source.
 
@@ -100,6 +106,18 @@ def run_supply(ds=None):
     coinmetrics_btc_supply_ingest.ingest_latest()
 
 
+def run_active_addresses(ds=None):
+    coinmetrics_btc_active_addresses_ingest.ingest_latest()
+
+
+def run_tx_count(ds=None):
+    coinmetrics_btc_tx_count_ingest.ingest_latest()
+
+
+def run_trends(ds=None):
+    google_trends_btc_ingest.ingest_latest()
+
+
 INGEST_STEPS = [
     ("ingest_binance_btc", run_binance_btc),
     ("ingest_mvrv", run_mvrv),
@@ -110,6 +128,9 @@ INGEST_STEPS = [
     ("ingest_vix", run_vix),
     ("ingest_m2", run_m2),
     ("ingest_supply", run_supply),
+    ("ingest_active_addresses", run_active_addresses),
+    ("ingest_tx_count", run_tx_count),
+    ("ingest_trends", run_trends),
 ]
 
 

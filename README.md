@@ -77,10 +77,12 @@ and the job executes on managed GCP workers.
    UTC** (`catchup=False`); the run processes `{{ ds }}` — yesterday's fully closed
    candle. Tasks carry retries with exponential backoff and a failure alert.
 2. **Ingest — `PythonOperator` fan-out (one per series):** Binance BTC/USDT plus
-   the macro / on-chain series (MVRV, DXY, 10Y, 2Y, Fed funds, VIX, M2, supply),
-   each reusing its `orchestration/ingest/*` module. Concurrency is capped to two
-   tasks to fit the e2-micro's RAM. Bitstamp is excluded — pre-2017 history, not a
-   daily source.
+   the macro / on-chain / attention series (MVRV, DXY, 10Y, 2Y, Fed funds, VIX, M2,
+   supply, active addresses, tx count, Google Trends investor attention), each
+   reusing its `orchestration/ingest/*` module. Concurrency is capped to two tasks
+   to fit the e2-micro's RAM. Google Trends is weekly — its step refreshes the
+   latest window in place (idempotent). Bitstamp is excluded — pre-2017 history, not
+   a daily source.
 3. **Conform to silver — Dataflow (`stages/conform.py`):** reads the daily candles
    from every bronze candle table and consolidates them, then writes
    `prod_trade_silver.ohlcv_validated` (`temporality='1d'`) and the aggregated
