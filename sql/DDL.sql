@@ -392,6 +392,87 @@ WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source,
 VALUES (12, 'Coin Metrics BTC supply (SplyCur)', NULL, TRUE, 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics', 'Coin Metrics (community)', CURRENT_TIMESTAMP());
 
 
+-- BTC active addresses (Coin Metrics community API, metric AdrActCnt, daily) from
+-- the same free endpoint as supply (no key). On-chain network-activity factor; like
+-- MVRV/supply it is NOT candle data and does NOT feed `conform`: one value per UTC
+-- date, its own bronze table, partitioned by its date, idempotent MERGE on
+-- `metric_date`. The daily training view turns the raw count into a stationary
+-- year-over-year log-growth feature. Full history back-filled once, refreshed daily.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.coinmetrics_btc_active_addresses_daily_raw` (
+  metric_date      DATE      NOT NULL OPTIONS(description = "Metric date (UTC); Coin Metrics `time`. Business key and partition column."),
+  active_addresses INT64     OPTIONS(description = "Count of distinct active on-chain addresses (Coin Metrics AdrActCnt). NULL when the source delivers no value for the date."),
+  source_id        INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update  TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (metric_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY metric_date
+OPTIONS(description = "Raw daily BTC active-address count (Coin Metrics AdrActCnt) from the free community API. Idempotent daily upsert on metric_date; full history back-filled from the same endpoint.");
+
+-- Register Coin Metrics (BTC active addresses) as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 13 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (13, 'Coin Metrics BTC active addresses (AdrActCnt)', NULL, TRUE, 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics', 'Coin Metrics (community)', CURRENT_TIMESTAMP());
+
+
+-- BTC transaction count (Coin Metrics community API, metric TxCnt, daily) from the
+-- same free endpoint (no key). On-chain network-activity factor; same model as the
+-- active-address table: one value per UTC date, its own bronze table, partitioned by
+-- `metric_date`, idempotent MERGE, NOT part of `conform`. The daily training view
+-- turns the raw count into a stationary year-over-year log-growth feature.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.coinmetrics_btc_tx_count_daily_raw` (
+  metric_date     DATE      NOT NULL OPTIONS(description = "Metric date (UTC); Coin Metrics `time`. Business key and partition column."),
+  tx_count        INT64     OPTIONS(description = "Count of confirmed on-chain transactions (Coin Metrics TxCnt). NULL when the source delivers no value for the date."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (metric_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY metric_date
+OPTIONS(description = "Raw daily BTC on-chain transaction count (Coin Metrics TxCnt) from the free community API. Idempotent daily upsert on metric_date; full history back-filled from the same endpoint.");
+
+-- Register Coin Metrics (BTC transaction count) as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 14 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (14, 'Coin Metrics BTC transaction count (TxCnt)', NULL, TRUE, 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics', 'Coin Metrics (community)', CURRENT_TIMESTAMP());
+
+
+-- BTC investor attention (Google Trends, weekly search interest for "Bitcoin"). NOT
+-- candle data and NOT part of `conform`. Bronze stores the value EXACTLY as Google
+-- delivers it for each request window (medallion: bronze is raw, no transforms): a
+-- weekly point can appear under several `window_start`s (the overlapping requests
+-- the back-fill issues), each its own raw 0-100 normalised within that window. The
+-- continuous, stitched, re-normalised series is built downstream by the silver view
+-- `vw_google_trends_btc_weekly` (NOT here). WEEKLY on purpose: Google only serves a
+-- continuous daily series for short windows and re-normalises the 0-100 scale per
+-- request, so windows cannot be concatenated without re-scaling (done in silver).
+-- `trend_date` is the week-start (Sunday) the source labels each weekly point with.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.google_trends_btc_weekly_raw` (
+  trend_date      DATE      NOT NULL OPTIONS(description = "Week-start date (Sunday) Google Trends labels the weekly point with. Partition column; part of the business key."),
+  search_term     STRING    NOT NULL OPTIONS(description = "Google Trends query term (e.g. 'Bitcoin'). Part of the business key so several terms can share the table."),
+  window_start    DATE      NOT NULL OPTIONS(description = "Start date of the request window this raw value came from. Part of the business key: the same week appears once per overlapping window, each on its own per-request 0-100 scale."),
+  window_end      DATE      OPTIONS(description = "End date of the request window this raw value came from (audit/metadata)."),
+  interest_raw    INT64     OPTIONS(description = "Weekly search-interest index (0-100) EXACTLY as Google delivered it for this request window (no stitching/re-scaling). NULL when the source delivers no value for the week."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (search_term, window_start, trend_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY trend_date
+OPTIONS(description = "Raw weekly BTC search-interest index (0-100) from Google Trends, AS DELIVERED per request window (one row per window_start x trend_date; no stitching). The stitched continuous series is the silver view vw_google_trends_btc_weekly. Idempotent upsert on (search_term, window_start, trend_date).");
+
+-- Register Google Trends (BTC investor attention) as a source. Idempotent seed. priority NULL.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 15 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (15, 'Google Trends BTC investor attention (weekly)', NULL, TRUE, 'https://trends.google.com/trends', 'Google Trends', CURRENT_TIMESTAMP());
+
+
 -- ---------------------------------------------------------------------
 -- prod_trade_silver (Option B: symbol and temporality as columns)
 -- ---------------------------------------------------------------------
@@ -432,6 +513,70 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_silver.rsi_features` (
 PARTITION BY DATE(time_period_start)
 CLUSTER BY symbol, temporality
 OPTIONS(description = "RSI feature computed with Wilder smoothing; recursive intermediate state stored for incremental, idempotent updates. Reusable across strategies.");
+
+
+-- ---------------------------------------------------------------------
+-- prod_trade_silver — Google Trends stitched weekly series (the transform that
+-- USED to be baked into the ingest now lives here, downstream of raw bronze).
+-- Google re-normalises its 0-100 per request, so the overlapping back-fill windows
+-- in bronze are not directly comparable. This view STITCHES them into one continuous
+-- series: order the windows, re-scale each onto the previous one by the ratio of
+-- their shared (overlap) weeks, assign every week to its EARLIEST window (so the
+-- earliest scale anchors overlaps), then re-normalise the whole series to 0-100.
+-- This is a pure, deterministic function of the raw bronze rows (re-run any time).
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW `trade-390514.prod_trade_silver.vw_google_trends_btc_weekly`
+OPTIONS(description = "Stitched, continuous weekly Google Trends interest per search_term (0-100, re-normalised to the all-time max). Built from bronze.google_trends_btc_weekly_raw by re-scaling the overlapping per-request windows on their shared weeks (earliest window anchors overlaps). trend_date is the week-start Sunday. This is where the stitching transform lives — bronze stays raw.")
+AS
+WITH raw AS (
+  SELECT search_term, window_start, trend_date, interest_raw
+  FROM `trade-390514.prod_trade_bronze.google_trends_btc_weekly_raw`
+  WHERE interest_raw IS NOT NULL
+),
+-- Number the request windows per term (1 = earliest).
+win AS (
+  SELECT search_term, window_start,
+         DENSE_RANK() OVER (PARTITION BY search_term ORDER BY window_start) AS wi
+  FROM raw GROUP BY search_term, window_start
+),
+-- Pairwise re-scale factor mapping each window onto the PREVIOUS one, computed over
+-- the weeks the two share: factor = sum(prev.raw) / sum(cur.raw) on the overlap.
+pairs AS (
+  SELECT c.search_term, c.window_start AS cur_ws,
+         SAFE_DIVIDE(SUM(p.interest_raw), SUM(c.interest_raw)) AS factor
+  FROM raw c
+  JOIN win wc ON wc.search_term = c.search_term AND wc.window_start = c.window_start
+  JOIN win wp ON wp.search_term = c.search_term AND wp.wi = wc.wi - 1
+  JOIN raw p  ON p.search_term  = c.search_term AND p.window_start = wp.window_start
+             AND p.trend_date   = c.trend_date
+  GROUP BY c.search_term, c.window_start
+),
+-- Cumulative scale per window = running product of factors (window 1 = 1.0). The
+-- product is done in log space so it composes as a window SUM.
+cum AS (
+  SELECT w.search_term, w.window_start, w.wi,
+         EXP(SUM(LN(COALESCE(pairs.factor, 1.0))) OVER (
+             PARTITION BY w.search_term ORDER BY w.wi
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS scale
+  FROM win w
+  LEFT JOIN pairs ON pairs.search_term = w.search_term AND pairs.cur_ws = w.window_start
+),
+-- Each week keeps the value from its EARLIEST window (anchors overlaps).
+assigned AS (
+  SELECT search_term, trend_date, interest_raw, window_start,
+         ROW_NUMBER() OVER (PARTITION BY search_term, trend_date ORDER BY window_start) AS rn
+  FROM raw
+),
+scaled AS (
+  SELECT a.search_term, a.trend_date, a.interest_raw * c.scale AS v
+  FROM assigned a
+  JOIN cum c ON c.search_term = a.search_term AND c.window_start = a.window_start
+  WHERE a.rn = 1
+)
+-- Re-normalise the stitched series to a 0-100 index (max of all time = 100).
+SELECT search_term, trend_date,
+       100 * SAFE_DIVIDE(v, MAX(v) OVER (PARTITION BY search_term)) AS interest
+FROM scaled;
 
 
 -- ---------------------------------------------------------------------
@@ -542,7 +687,7 @@ WHEN NOT MATCHED THEN INSERT (
 -- Daily: MVRV (real date) of day D against the daily RSI row of day D. With the
 -- 1-day lag, the real value of D lives under mvrvz_date = D + 1.
 CREATE OR REPLACE VIEW `trade-390514.prod_trade_gold.vw_btc_training_daily`
-OPTIONS(description = "Daily BTC model-feature set (stationary features only; raw levels used internally are NOT exposed — price/labels live in silver.rsi_features). Columns: date, daily RSI(14), weekly RSI(14) as-of, MVRV Z-Score, VIX, price_vs_ema365 (price/EMA365-1), dxy_vs_ema365 (DXY/EMA365-1), realized_vol_30d, m2_yoy_log (ln M2_t/M2_{t-52w}), m2_roc_13w_ann ((M2_t/M2_{t-13w})^(52/13)-1), teny_chg_30d (DGS10 30-day change), the 10Y-2Y spread (+1-month change +dis-inversion flag), and BTC halving-cycle features (cycle_phase + sin/cos + annualised issuance). MVRV is on the same calendar date (its source lags 1 day, join +1). Macro/weekly-RSI are point-in-time as-of the trading day (latest value known on/before D; M2 via the vintage current at D, incl. the -52w/-13w lookbacks; weekly RSI only for weeks already closed), so no look-ahead. The EMA(365) is an exact closed-form EMA; realized_vol_30d = stddev of the last 30 daily log-returns x sqrt(365); cycle_phase = block fraction through the current halving epoch (epoch fixed by date, supply from Coin Metrics); issuance_rate_ann = 52560 x block_subsidy / circulating_supply. Read-only join of silver.rsi_features (1d/1w) with bronze MVRV, the macro tables and BTC supply.")
+OPTIONS(description = "Daily BTC model-feature set (stationary features only; raw levels used internally are NOT exposed — price/labels live in silver.rsi_features). Columns: date, daily RSI(14), weekly RSI(14) as-of, MVRV Z-Score, VIX, price_vs_ema365 (price/EMA365-1), dxy_vs_ema365 (DXY/EMA365-1), realized_vol_30d, m2_yoy_log (ln M2_t/M2_{t-52w}), m2_roc_13w_ann ((M2_t/M2_{t-13w})^(52/13)-1), teny_chg_30d (DGS10 30-day change), the 10Y-2Y spread (+1-month change +dis-inversion flag), and BTC halving-cycle features (cycle_phase + sin/cos + annualised issuance). MVRV is on the same calendar date (its source lags 1 day, join +1). Macro/weekly-RSI are point-in-time as-of the trading day (latest value known on/before D; M2 via the vintage current at D, incl. the -52w/-13w lookbacks; weekly RSI only for weeks already closed), so no look-ahead. The EMA(365) is an exact closed-form EMA; realized_vol_30d = stddev of the last 30 daily log-returns x sqrt(365); cycle_phase = block fraction through the current halving epoch (epoch fixed by date, supply from Coin Metrics); issuance_rate_ann = 52560 x block_subsidy / circulating_supply. On-chain activity (Coin Metrics): active_addresses_yoy_log and tx_count_yoy_log are the stationary year-over-year log growth of the raw daily counts (ln x_t/x_{t-1y}). investor_attention is the weekly Google Trends 0-100 search index, taken as-of the prior fully-closed week (no within-week look-ahead) and forward-filled. Read-only join of silver.rsi_features (1d/1w) with bronze MVRV, the macro tables, BTC supply, the Coin Metrics on-chain tables and Google Trends.")
 AS
 WITH btc AS (
   SELECT DATE(r.time_period_start) AS d, r.price_close, r.rsi
@@ -681,6 +826,48 @@ supply_asof AS (
     ON s.supply_date <= b.d AND s.supply_date >= '2010-01-01'
   QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY s.supply_date DESC) = 1
 ),
+-- On-chain network activity (Coin Metrics): active addresses and transaction count.
+-- The raw counts are non-stationary (they trend up for years), so — like price vs
+-- its EMA and M2 YoY — we expose the stationary YEAR-OVER-YEAR LOG growth:
+-- ln(x_t / x_{t-1y}). The lag is taken over the NATIVE daily series (dense, one row
+-- per date) so LAG(.,365) is a true ~1-year lag, then as-of joined to the trading
+-- day. SAFE.LN/NULLIF leave the first ~year and any non-positive ratio as NULL.
+addr_calc AS (
+  SELECT metric_date,
+         SAFE.LN(active_addresses /
+                 NULLIF(LAG(active_addresses, 365) OVER (ORDER BY metric_date), 0))
+           AS active_addresses_yoy_log
+  FROM `trade-390514.prod_trade_bronze.coinmetrics_btc_active_addresses_daily_raw`
+),
+addr_asof AS (
+  SELECT b.d, a.active_addresses_yoy_log
+  FROM btc b LEFT JOIN addr_calc AS a
+    ON a.metric_date <= b.d AND a.metric_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY a.metric_date DESC) = 1
+),
+tx_calc AS (
+  SELECT metric_date,
+         SAFE.LN(tx_count /
+                 NULLIF(LAG(tx_count, 365) OVER (ORDER BY metric_date), 0))
+           AS tx_count_yoy_log
+  FROM `trade-390514.prod_trade_bronze.coinmetrics_btc_tx_count_daily_raw`
+),
+tx_asof AS (
+  SELECT b.d, t.tx_count_yoy_log
+  FROM btc b LEFT JOIN tx_calc AS t
+    ON t.metric_date <= b.d AND t.metric_date >= '2010-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY t.metric_date DESC) = 1
+),
+-- Investor attention (Google Trends, weekly 0-100 index). Take the most recent
+-- weekly point whose week has FULLY ended before d (week_end = trend_date + 6 < d),
+-- so there is no within-week look-ahead, and forward-fill it across the current
+-- week. The index is already a bounded normalised level, so it is exposed as-is.
+trends_asof AS (
+  SELECT b.d, g.interest AS investor_attention
+  FROM btc b LEFT JOIN `trade-390514.prod_trade_silver.vw_google_trends_btc_weekly` AS g
+    ON g.search_term = 'Bitcoin' AND DATE_ADD(g.trend_date, INTERVAL 6 DAY) < b.d
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY b.d ORDER BY g.trend_date DESC) = 1
+),
 -- One row per day with all as-of features, the term spread (level) and the halving
 -- epoch (fixed by date; epoch boundaries are known on-chain events).
 joined AS (
@@ -700,6 +887,9 @@ joined AS (
     m2_13w_asof.m2_13w,
     dgs10_asof.treasury_10y - dgs2_asof.treasury_2y AS spread_10y_2y,
     supply_asof.circ_supply,
+    addr_asof.active_addresses_yoy_log,
+    tx_asof.tx_count_yoy_log,
+    trends_asof.investor_attention,
     CASE
       WHEN b.d < '2012-11-28' THEN 0
       WHEN b.d < '2016-07-09' THEN 1
@@ -719,6 +909,9 @@ joined AS (
   LEFT JOIN m2_13w_asof      USING (d)
   LEFT JOIN rsi_weekly_asof  USING (d)
   LEFT JOIN supply_asof      USING (d)
+  LEFT JOIN addr_asof        USING (d)
+  LEFT JOIN tx_asof          USING (d)
+  LEFT JOIN trends_asof      USING (d)
 ),
 -- Halving-cycle derivations: block subsidy = 50 / 2^epoch; cycle_phase = block
 -- fraction through the epoch = (supply - supply_at_halving) / epoch_issuance,
@@ -771,7 +964,13 @@ SELECT
   SIN(2 * ACOS(-1) * c.cycle_phase) AS cycle_phase_sin,
   COS(2 * ACOS(-1) * c.cycle_phase) AS cycle_phase_cos,
   -- Annualised issuance rate: yearly new BTC / circulating supply.
-  SAFE_DIVIDE(52560 * c.block_subsidy, c.circ_supply) AS issuance_rate_ann
+  SAFE_DIVIDE(52560 * c.block_subsidy, c.circ_supply) AS issuance_rate_ann,
+  -- On-chain network activity, stationary year-over-year log growth (Coin Metrics).
+  c.active_addresses_yoy_log,
+  c.tx_count_yoy_log,
+  -- Investor attention: weekly Google Trends 0-100 index of the prior completed
+  -- week (no within-week look-ahead), forward-filled across the current week.
+  c.investor_attention
 FROM cyc c
 LEFT JOIN px_calc pc ON pc.d = c.date;
 
@@ -872,3 +1071,40 @@ SELECT
     FALSE
   ) AS dis_inverting_from_neg
 FROM joined j;
+
+
+-- Daily monitoring / dashboard view for the Looker Studio report. Unlike the
+-- training views (stationary model features only), this exposes the RAW, comparable
+-- LEVELS of the ingested series side by side — for visual QA of what was ingested,
+-- not for modelling. price_close comes from silver.rsi_features (the training view
+-- hides it on purpose); RSI/MVRV/VIX/realised-vol/attention come from the daily
+-- training view (so the dashboard matches the model's point-in-time alignment); the
+-- Coin Metrics on-chain counts join straight from bronze (raw level), alongside
+-- their year-over-year log-growth from the training view. One row per trading day.
+CREATE OR REPLACE VIEW `trade-390514.prod_trade_gold.vw_btc_monitor_daily`
+OPTIONS(description = "Daily BTC monitoring/dashboard view (Looker Studio report source): raw, comparable levels of the ingested series side by side — price_close, daily/weekly RSI(14), MVRV Z-Score, VIX, realised vol, price_vs_ema365, Google Trends investor attention, Coin Metrics on-chain active addresses and tx count (raw counts + YoY log growth). For visual QA of what was ingested, NOT model features. Built on vw_btc_training_daily + silver.rsi_features (price_close) + the Coin Metrics bronze tables; one row per trading day. On-chain raw counts (~1e5-1e6) dwarf the other series — plot them on a secondary axis or use the *_yoy_log columns.")
+AS
+SELECT
+  d.date,
+  s.price_close,
+  d.rsi                 AS rsi_daily,
+  d.rsi_weekly,
+  d.mvrv_zscore,
+  d.vix,
+  d.realized_vol_30d,
+  d.price_vs_ema365,
+  d.investor_attention  AS google_trends,
+  a.active_addresses,                 -- Coin Metrics raw level (bronze)
+  t.tx_count,                         -- Coin Metrics raw level (bronze)
+  d.active_addresses_yoy_log,         -- YoY log growth (from the training view)
+  d.tx_count_yoy_log
+FROM `trade-390514.prod_trade_gold.vw_btc_training_daily` AS d
+JOIN (
+  SELECT DATE(time_period_start) AS date, price_close
+  FROM `trade-390514.prod_trade_silver.rsi_features`
+  WHERE symbol = 'BTCUSD' AND temporality = '1d' AND rsi_period = 14
+) AS s USING (date)
+LEFT JOIN `trade-390514.prod_trade_bronze.coinmetrics_btc_active_addresses_daily_raw` AS a
+  ON a.metric_date = d.date
+LEFT JOIN `trade-390514.prod_trade_bronze.coinmetrics_btc_tx_count_daily_raw` AS t
+  ON t.metric_date = d.date;
