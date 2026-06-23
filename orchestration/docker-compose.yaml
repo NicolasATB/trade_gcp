@@ -93,10 +93,13 @@ services:
     mem_limit: 300m
 
   # One-shot initializer: runs as root (0:0) — not the runtime UID — so it can:
-  #   (a) create and chown the bind-mounted logs/dags/plugins to ${AIRFLOW_UID}:0.
-  #       The host clone owns them as the login user, so the 50000:0 container user
-  #       couldn't write logs and the scheduler's DagFileProcessor crashed. Root
-  #       fixes the ownership before the long-running services start.
+  #   (a) make the bind-mounted logs/ writable by the container. Only logs/ is
+  #       chowned to ${AIRFLOW_UID}:0: it is the one dir the container WRITES, and
+  #       the host clone owns it as the login user, so the 50000:0 user couldn't
+  #       write and the scheduler's DagFileProcessor crashed. dags/ and plugins/
+  #       are left owned by the host user on purpose — the container only READS
+  #       them (world-readable), and chowning them to 50000 would break `git pull`
+  #       on the VM (the login user could no longer update tracked files).
   #   (b) tolerate an arbitrary AIRFLOW_UID. The overridden entrypoint skips the
   #       image's passwd-registration step, so a UID not baked into the image
   #       (e.g. a host `id -u`) broke `airflow` with "uid not found"; root is
@@ -110,7 +113,7 @@ services:
       - -c
       - |
         mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins
-        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs
         airflow db migrate
         airflow users create \
           --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
