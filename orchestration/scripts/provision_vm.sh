@@ -8,14 +8,21 @@
 # APIs enabled (Compute Engine, IAP for tunneling). Run from Git Bash / Linux.
 #
 # Usage:
-#   ./provision_vm.sh                 # create the VM (Docker + 2 GB swap baked
-#                                     # in via the startup script)
-#   then follow the printed "Next steps" to upload secrets and start Airflow.
+#   ./provision_vm.sh                 # create Cloud NAT + the VM (Docker + 2 GB
+#                                     # swap baked in via the startup script)
+#   then follow the printed "Next steps" to configure secrets and start Airflow.
+#
+# Auth to GCP is the VM's attached service account (trade-pipeline@…, scope
+# cloud-platform) via the metadata server — no key file is created or uploaded.
 set -euo pipefail
 
 # --- Config (override via env) ------------------------------------------------
 PROJECT="${GCP_PROJECT:-trade-390514}"
 ZONE="${GCP_ZONE:-us-central1-a}"
+REGION="${GCP_REGION:-us-central1}"
+NETWORK="${GCP_NETWORK:-default}"
+ROUTER_NAME="${ROUTER_NAME:-trade-nat-router}"
+NAT_NAME="${NAT_NAME:-trade-nat}"
 VM_NAME="${VM_NAME:-trade-airflow}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-micro}"
 BOOT_DISK_SIZE="${BOOT_DISK_SIZE:-30GB}"
@@ -42,6 +49,36 @@ if ! command -v docker >/dev/null 2>&1; then
   usermod -aG docker "$(getent passwd 1000 | cut -d: -f1)" || true
 fi
 EOS
+
+# --- Cloud NAT (egress for the --no-address VM) -------------------------------
+# The VM is created with --no-address, so it has no public IP and zero internet
+# egress on its own. SSH still works through IAP (Google's internal network),
+# but outbound traffic — the startup script's `curl get.docker.com` and the
+# daily ingest (Binance, FRED, Yahoo, Coin Metrics, bitcoin-data.com, Docker
+# Hub) — needs Cloud NAT. Cloud NAT is preferred over an external IP because the
+# `default` VPC has `default-allow-ssh 0.0.0.0/0`, so a public IP would expose
+# SSH to the internet. Both steps are idempotent.
+if gcloud compute routers describe "$ROUTER_NAME" --region "$REGION" --project "$PROJECT" >/dev/null 2>&1; then
+  echo "Cloud Router '$ROUTER_NAME' already exists in $REGION — skipping."
+else
+  echo "Creating Cloud Router '$ROUTER_NAME' in $REGION ..."
+  gcloud compute routers create "$ROUTER_NAME" \
+    --project "$PROJECT" \
+    --region "$REGION" \
+    --network "$NETWORK"
+fi
+
+if gcloud compute routers nats describe "$NAT_NAME" --router "$ROUTER_NAME" --region "$REGION" --project "$PROJECT" >/dev/null 2>&1; then
+  echo "Cloud NAT '$NAT_NAME' already exists on '$ROUTER_NAME' — skipping."
+else
+  echo "Creating Cloud NAT '$NAT_NAME' on '$ROUTER_NAME' ..."
+  gcloud compute routers nats create "$NAT_NAME" \
+    --project "$PROJECT" \
+    --router "$ROUTER_NAME" \
+    --region "$REGION" \
+    --auto-allocate-nat-external-ips \
+    --nat-all-subnet-ip-ranges
+fi
 
 # --- Create the VM ------------------------------------------------------------
 if gcloud compute instances describe "$VM_NAME" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
@@ -73,21 +110,16 @@ VM ready. Next steps (run from your machine):
   # 2) Clone the repo and enter the orchestration dir:
   git clone <REPO_URL> trade_gcp && cd trade_gcp/orchestration
 
-  # 3) Secrets (never committed):
-  cp .env.example .env && nano .env          # fill in real values
-  mkdir -p keys                              # then upload the SA key (step 4)
+  # 3) Secrets (never committed): fill AIRFLOW_UID, the admin password, a Fernet
+  #    key and FRED_API_KEY. No GCP key file — the VM uses its attached SA (ADC).
+  cp .env.example .env && nano .env
 
-  # 4) From your machine, copy the service-account key to the VM:
-  gcloud compute scp <PATH_TO_SA_KEY>.json \\
-      $VM_NAME:~/trade_gcp/orchestration/keys/sa.json \\
-      --zone $ZONE --project $PROJECT --tunnel-through-iap
-
-  # 5) Build and start Airflow (on the VM):
+  # 4) Build and start Airflow (on the VM):
   docker compose build
   docker compose up airflow-init             # one-shot: migrate + create admin
   docker compose up -d                       # scheduler + webserver
 
-  # 6) Reach the UI from your machine via an IAP port-forward, then open
+  # 5) Reach the UI from your machine via an IAP port-forward, then open
   #    http://localhost:8080 :
   gcloud compute ssh $VM_NAME --zone $ZONE --project $PROJECT \\
       --tunnel-through-iap -- -L 8080:localhost:8080

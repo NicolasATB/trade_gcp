@@ -43,12 +43,15 @@ x-airflow-common: &airflow-common
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     # Make the project packages importable and the Dataflow launcher reachable.
     PYTHONPATH: /opt/airflow/repo
-    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/keys/sa.json
+    # No GOOGLE_APPLICATION_CREDENTIALS on purpose: the VM runs as its attached
+    # service account (trade-pipeline@…, cloud-platform scope), so the google
+    # libraries authenticate through the metadata server (ADC) — reachable from
+    # the container — with no key file to mount, manage or rotate. Setting the
+    # var to a missing path would break ADC, so it must stay unset.
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
-    - ./keys:/opt/airflow/keys:ro
     - ..:/opt/airflow/repo:ro
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:

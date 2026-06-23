@@ -12,7 +12,7 @@ the ingest tasks (`ingest/`) and the alert task (`alerts/`, T-10). Dataflow is
 | `Dockerfile`         | Airflow 2.10.5 image + ingest deps + an isolated Beam venv.    |
 | `requirements.txt`   | Extra deps baked into the Airflow environment.                 |
 | `.env.example`       | Secrets/config template — copy to `.env` on the VM.            |
-| `scripts/provision_vm.sh` | gcloud bootstrap: create the VM, swap and Docker.         |
+| `scripts/provision_vm.sh` | gcloud bootstrap: Cloud NAT, the VM, swap and Docker.     |
 | `ingest/`            | Ingestion modules (imported as `orchestration.ingest.*`).      |
 | `dags/`              | The daily DAG `daily_btc_signal` (T-12).                        |
 | `pipeline_launch.py` | Airflow-free helpers for the DAG (launch command + ingest steps). |
@@ -32,9 +32,20 @@ the ingest tasks (`ingest/`) and the alert task (`alerts/`, T-10). Dataflow is
 - **Beam is isolated.** `apache-beam[gcp]` pins libraries that conflict with
   Airflow's, so it lives in `/opt/beam-venv`. The DAG launches the pipeline with
   `/opt/beam-venv/bin/python -m dataflow.pipeline` (PYTHONPATH=/opt/airflow/repo).
-- **Secrets never in git.** The service-account key (`keys/sa.json`) and `.env`
-  are git-ignored and live only on the VM. Migrating them to Secret Manager is
-  tracked as T-13.
+- **No GCP key file — attached service account.** The VM is created with the
+  `trade-pipeline@…` service account attached (`--scopes cloud-platform`), so the
+  google client libraries (BigQuery, Beam) authenticate through the metadata
+  server (Application Default Credentials), reachable from inside the containers.
+  There is **no `keys/sa.json`** to upload, mount, manage or rotate, and
+  `GOOGLE_APPLICATION_CREDENTIALS` is intentionally left unset (a missing path
+  would break ADC). This is the secret-handling approach for T-13.
+- **Egress via Cloud NAT.** The VM has no public IP (`--no-address`), so the
+  bootstrap also creates a Cloud Router + Cloud NAT to give it outbound internet
+  (Docker Hub, the ingest source APIs). NAT is preferred over an external IP
+  because the `default` VPC's `default-allow-ssh 0.0.0.0/0` would otherwise expose
+  SSH; inbound stays closed and SSH goes through IAP.
+- **Secrets never in git.** `.env` (Fernet key, admin password, `FRED_API_KEY`)
+  is git-ignored and lives only on the VM.
 
 ## Daily DAG — `daily_btc_signal` (T-12)
 
@@ -79,28 +90,27 @@ docker compose exec airflow-scheduler airflow dags trigger daily_btc_signal
 ## Deploy
 
 ```bash
-# 1) Provision the VM (Docker + 2 GB swap via startup script):
+# 1) Provision Cloud NAT + the VM (Docker + 2 GB swap via startup script):
 ./scripts/provision_vm.sh
 
 # 2) SSH in through IAP (the VM has no public IP):
 gcloud compute ssh trade-airflow --zone us-central1-a --tunnel-through-iap
 
 # On the VM, inside trade_gcp/orchestration:
-cp .env.example .env && nano .env          # fill in real values
-mkdir -p keys                              # SA key goes here (scp from your box)
+cp .env.example .env && nano .env          # AIRFLOW_UID, admin password,
+                                           # Fernet key, FRED_API_KEY
+                                           # (no GCP key file — attached SA / ADC)
 
 docker compose build
 docker compose up airflow-init             # one-shot: db migrate + admin user
 docker compose up -d                       # scheduler + webserver
 ```
 
-Upload the service-account key from your machine:
-
-```bash
-gcloud compute scp <PATH_TO_SA_KEY>.json \
-    trade-airflow:~/trade_gcp/orchestration/keys/sa.json \
-    --zone us-central1-a --tunnel-through-iap
-```
+> GCP auth needs no key file: the VM runs as its attached service account
+> (`trade-pipeline@…`) and the libraries pick it up via the metadata server (ADC).
+> If the startup script timed out installing Docker (it has a ~5-min deadline and
+> the convenience script can be slow on an e2-micro), finish it by hand on the VM:
+> `curl -fsSL https://get.docker.com | sh` then `sudo systemctl enable --now docker`.
 
 Reach the UI (never expose port 8080 publicly) via an IAP port-forward, then open
 <http://localhost:8080>:
