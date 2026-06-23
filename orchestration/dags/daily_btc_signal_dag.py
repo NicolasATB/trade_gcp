@@ -99,7 +99,10 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
-    "execution_timeout": timedelta(minutes=20),
+    # Generous on purpose: on the e2-micro a single ingest can crawl under swap.
+    # With MAX_ACTIVE_TASKS_PER_DAG=1 tasks run serially, so this caps a genuinely
+    # stuck task without tripping on mere slowness.
+    "execution_timeout": timedelta(minutes=45),
     "on_failure_callback": _alert_on_failure,
 }
 
@@ -135,7 +138,7 @@ with DAG(
             "cd /opt/airflow/repo && "
             + " ".join(build_dataflow_command("{{ ds }}"))
         ),
-        execution_timeout=timedelta(minutes=40),
+        execution_timeout=timedelta(minutes=90),  # blocks until the Dataflow job finishes
         retries=1,  # MERGE is idempotent, so a single re-launch is safe.
     )
 

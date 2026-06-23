@@ -41,9 +41,12 @@ x-airflow-common: &airflow-common
     # Disable the periodic gunicorn worker refresh: spinning up a replacement
     # worker transiently runs two, doubling webserver memory and OOM-ing the VM.
     AIRFLOW__WEBSERVER__WORKER_REFRESH_BATCH_SIZE: '0'
-    # Keep the footprint small on a tiny VM.
-    AIRFLOW__CORE__PARALLELISM: '4'
-    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '2'
+    # Keep the footprint small on a tiny VM. ONE task at a time: on the e2-micro
+    # (1 GB) two concurrent ingests thrash swap so hard that tasks miss their
+    # heartbeat and blow past execution_timeout. Serial is slower but stable; the
+    # DAG runs once a day so wall-clock doesn't matter. Bump back to 2+ on e2-small.
+    AIRFLOW__CORE__PARALLELISM: '2'
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '1'
     AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: '1'
     AIRFLOW__SCHEDULER__PARSING_PROCESSES: '1'
     AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: '60'
