@@ -131,12 +131,19 @@ with DAG(
             )
 
     # Launch the medallion pipeline on Dataflow with the isolated Beam venv.
-    # cd into the repo root so the relative --setup_file ./setup.py resolves.
+    # --setup_file makes Beam build an sdist of the dataflow package, which writes
+    # build artifacts (*.egg-info) next to setup.py. The repo is mounted read-only,
+    # so copy setup.py + the package into a writable temp dir and launch from there.
     launch_dataflow = BashOperator(
         task_id="launch_dataflow",
         bash_command=(
-            "cd /opt/airflow/repo && "
+            "set -euo pipefail\n"
+            'BUILD="$(mktemp -d)"\n'
+            'trap \'rm -rf "$BUILD"\' EXIT\n'
+            'cp -r /opt/airflow/repo/dataflow /opt/airflow/repo/setup.py "$BUILD"/\n'
+            'cd "$BUILD"\n'
             + " ".join(build_dataflow_command("{{ ds }}"))
+            + "\n"
         ),
         execution_timeout=timedelta(minutes=90),  # blocks until the Dataflow job finishes
         retries=1,  # MERGE is idempotent, so a single re-launch is safe.
