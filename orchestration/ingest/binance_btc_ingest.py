@@ -30,11 +30,17 @@ from orchestration.ingest.ccxt_candle_common import (
 )
 
 # Config overridable via env vars (kept for parity with the rest of the ingests).
+# public_api_url routes Binance's public market data to data-api.binance.vision:
+# api.binance.com returns HTTP 451 from cloud IPs (the orchestration VM), while
+# the vision mirror serves the same klines/exchangeInfo unblocked.
 SOURCE = CcxtCandleSource(
     exchange_id=os.environ.get("CCXT_EXCHANGE", "binance"),
     symbol=os.environ.get("BINANCE_SYMBOL", "BTC/USDT"),
     table=os.environ.get("BQ_BRONZE_TABLE", "binance_btcusd_daily_raw"),
     source_id=int(os.environ.get("BINANCE_SOURCE_ID", "3")),
+    public_api_url=os.environ.get(
+        "BINANCE_PUBLIC_API_URL", "https://data-api.binance.vision/api/v3"
+    ),
 )
 
 

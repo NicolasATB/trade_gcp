@@ -13,12 +13,14 @@ No live network or BigQuery.
 from __future__ import annotations
 
 import re
+import types
 from datetime import date, datetime, timezone
 
 import pytest
 
 import orchestration.ingest as ingest_pkg
 from orchestration.ingest import binance_btc_ingest, bitstamp_btc_ingest
+from orchestration.ingest import ccxt_candle_common as _ccm
 from orchestration.ingest.ccxt_candle_common import (
     CcxtCandleSource,
     _build_row,
@@ -105,6 +107,27 @@ class TestFetchRange:
         with pytest.raises(ValueError):
             fetch_daily_candles_range(CFG, date(2024, 1, 2), date(2024, 1, 1), exchange=_FakeExchange([]))
 
+    def test_public_api_url_overrides_public_host(self, monkeypatch):
+        # When the exchange is built internally and cfg.public_api_url is set, the
+        # public REST base is rerouted (Binance 451 work-around via the vision host).
+        captured = {}
+
+        class _FakeBinance:
+            def __init__(self, *args, **kwargs):
+                self.urls = {"api": {"public": "https://api.binance.com/api/v3"}}
+
+            def fetch_ohlcv(self, *args, **kwargs):
+                captured["public"] = self.urls["api"]["public"]
+                return []
+
+        monkeypatch.setattr(_ccm, "ccxt", types.SimpleNamespace(binance=_FakeBinance))
+        cfg = CcxtCandleSource(
+            "binance", "BTC/USDT", "binance_btcusd_daily_raw", 3,
+            public_api_url="https://data-api.binance.vision/api/v3",
+        )
+        fetch_daily_candles_range(cfg, date(2024, 1, 1), date(2024, 1, 1))  # exchange=None
+        assert captured["public"] == "https://data-api.binance.vision/api/v3"
+
 
 # ---------------------------------------------------------------------------
 # _upsert_rows — idempotent MERGE on (symbol, candle_date) against a fake client
@@ -177,11 +200,16 @@ class TestEntryPointConfig:
         s = binance_btc_ingest.SOURCE
         assert (s.exchange_id, s.symbol, s.table, s.source_id) == (
             "binance", "BTC/USDT", "binance_btcusd_daily_raw", 3)
+        # Public market data is routed to the vision mirror (api.binance.com 451s
+        # from cloud IPs); same Binance BTC/USDT series, unblocked from the VM.
+        assert s.public_api_url == "https://data-api.binance.vision/api/v3"
 
     def test_bitstamp_config(self):
         s = bitstamp_btc_ingest.SOURCE
         assert (s.exchange_id, s.symbol, s.table, s.source_id) == (
             "bitstamp", "BTC/USD", "bitstamp_btcusd_daily_raw", 4)
+        # No override needed for Bitstamp.
+        assert s.public_api_url is None
 
     def test_entry_points_expose_bound_functions(self):
         for mod in (binance_btc_ingest, bitstamp_btc_ingest):

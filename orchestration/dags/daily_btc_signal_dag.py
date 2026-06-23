@@ -57,11 +57,39 @@ def _signal_alert(**context):
     )
 
 
+# The only ingest that feeds the signal pipeline (conform → rsi → signals); it
+# gates launch_dataflow. The rest are context series that feed the training views,
+# so they run in parallel but must NOT block the signal.
+_SIGNAL_INGEST_TASK_ID = "ingest_binance_btc"
+
+
 def _make_ingest_callable(fn):
-    """Adapt a pipeline_launch ingest wrapper to an Airflow python_callable."""
+    """Strict callable for the critical (candle) ingest — failures fail the task."""
 
     def _run(**context):
         fn(ds=context.get("ds"))
+
+    return _run
+
+
+def _make_best_effort_callable(fn):
+    """Tolerant callable for context ingests.
+
+    These feed only the training views, and some sources block the VM's cloud IP
+    (e.g. Google Trends 429s from datacenter ranges). A fetch failure is logged
+    but does NOT fail the task, so a flaky context series never reddens the run
+    nor — combined with the dependency wiring below — blocks the daily signal.
+    """
+
+    def _run(**context):
+        try:
+            fn(ds=context.get("ds"))
+        except Exception:  # noqa: BLE001 - best-effort context feed
+            logger.warning(
+                "context ingest failed (non-blocking) for ds=%s",
+                context.get("ds"),
+                exc_info=True,
+            )
 
     return _run
 
@@ -85,10 +113,19 @@ with DAG(
     default_args=default_args,
     tags=["trade", "btc", "rsi"],
 ) as dag:
-    ingest_tasks = [
-        PythonOperator(task_id=task_id, python_callable=_make_ingest_callable(fn))
-        for task_id, fn in INGEST_STEPS
-    ]
+    signal_ingest = None
+    context_ingests = []
+    for task_id, fn in INGEST_STEPS:
+        if task_id == _SIGNAL_INGEST_TASK_ID:
+            signal_ingest = PythonOperator(
+                task_id=task_id, python_callable=_make_ingest_callable(fn)
+            )
+        else:
+            context_ingests.append(
+                PythonOperator(
+                    task_id=task_id, python_callable=_make_best_effort_callable(fn)
+                )
+            )
 
     # Launch the medallion pipeline on Dataflow with the isolated Beam venv.
     # cd into the repo root so the relative --setup_file ./setup.py resolves.
@@ -107,4 +144,6 @@ with DAG(
         python_callable=_signal_alert,
     )
 
-    ingest_tasks >> launch_dataflow >> signal_alert
+    # Critical path: the candle gates Dataflow, which gates the alert. Context
+    # ingests run in parallel (best-effort) and do not gate the signal.
+    signal_ingest >> launch_dataflow >> signal_alert
