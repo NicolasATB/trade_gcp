@@ -31,6 +31,9 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'false'
+    # A single gunicorn worker: the default (4) OOM-kills the webserver on the
+    # e2-micro (1 GB). One worker is plenty for a single-user, once-a-day setup.
+    AIRFLOW__WEBSERVER__WORKERS: '1'
     # Keep the footprint small on a tiny VM.
     AIRFLOW__CORE__PARALLELISM: '4'
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '2'

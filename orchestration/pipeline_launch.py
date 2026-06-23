@@ -17,20 +17,12 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 
-from orchestration.ingest import (
-    binance_btc_ingest,
-    bitcoin_data_mvrv_ingest,
-    coinmetrics_btc_active_addresses_ingest,
-    coinmetrics_btc_supply_ingest,
-    coinmetrics_btc_tx_count_ingest,
-    fred_2y_ingest,
-    fred_10y_ingest,
-    fred_fedfunds_ingest,
-    fred_m2_ingest,
-    fred_vix_ingest,
-    google_trends_btc_ingest,
-    yahoo_dxy_ingest,
-)
+# NOTE: the ingest modules are imported lazily inside each wrapper below, not at
+# module top level. Importing them eagerly pulls in heavy dependencies (notably
+# ``ccxt``, which registers hundreds of exchange classes) — slow enough that the
+# Airflow DAG parser hits its ``dagbag_import_timeout`` (30 s) on the e2-micro
+# VM, so the DAG fails to load. Deferring the imports keeps DAG parsing instant;
+# ``ccxt`` & friends are only imported when a task actually runs.
 
 # Defaults mirror dataflow/pipeline.py and the GCS bucket used for the Dataflow
 # runs (see comandos.md / T-08), so the launch behaves the same whether or not
@@ -70,51 +62,75 @@ def _to_date(ds):
 
 
 def run_binance_btc(ds=None):
+    from orchestration.ingest import binance_btc_ingest
+
     d = _to_date(ds)
     binance_btc_ingest.ingest_daily_candles(start_date=d, end_date=d)
 
 
 def run_mvrv(ds=None):
+    from orchestration.ingest import bitcoin_data_mvrv_ingest
+
     bitcoin_data_mvrv_ingest.ingest_latest()
 
 
 def run_dxy(ds=None):
+    from orchestration.ingest import yahoo_dxy_ingest
+
     yahoo_dxy_ingest.ingest_latest()
 
 
 def run_treasury_10y(ds=None):
+    from orchestration.ingest import fred_10y_ingest
+
     fred_10y_ingest.ingest_latest()
 
 
 def run_treasury_2y(ds=None):
+    from orchestration.ingest import fred_2y_ingest
+
     fred_2y_ingest.ingest_latest()
 
 
 def run_fed_funds(ds=None):
+    from orchestration.ingest import fred_fedfunds_ingest
+
     fred_fedfunds_ingest.ingest_latest()
 
 
 def run_vix(ds=None):
+    from orchestration.ingest import fred_vix_ingest
+
     fred_vix_ingest.ingest_latest()
 
 
 def run_m2(ds=None):
+    from orchestration.ingest import fred_m2_ingest
+
     fred_m2_ingest.ingest_latest()
 
 
 def run_supply(ds=None):
+    from orchestration.ingest import coinmetrics_btc_supply_ingest
+
     coinmetrics_btc_supply_ingest.ingest_latest()
 
 
 def run_active_addresses(ds=None):
+    from orchestration.ingest import coinmetrics_btc_active_addresses_ingest
+
     coinmetrics_btc_active_addresses_ingest.ingest_latest()
 
 
 def run_tx_count(ds=None):
+    from orchestration.ingest import coinmetrics_btc_tx_count_ingest
+
     coinmetrics_btc_tx_count_ingest.ingest_latest()
 
 
 def run_trends(ds=None):
+    from orchestration.ingest import google_trends_btc_ingest
+
     google_trends_btc_ingest.ingest_latest()
 
 

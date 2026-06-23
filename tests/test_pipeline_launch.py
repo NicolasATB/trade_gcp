@@ -106,9 +106,11 @@ def test_run_binance_btc_passes_logical_date(monkeypatch):
         captured["start_date"] = start_date
         captured["end_date"] = end_date
 
-    monkeypatch.setattr(
-        pipeline_launch.binance_btc_ingest, "ingest_daily_candles", fake_ingest
-    )
+    # The wrapper imports the module lazily; patch it at the source so the
+    # in-function ``from orchestration.ingest import ...`` picks up the fake.
+    from orchestration.ingest import binance_btc_ingest
+
+    monkeypatch.setattr(binance_btc_ingest, "ingest_daily_candles", fake_ingest)
     pipeline_launch.run_binance_btc(ds="2026-06-15")
     from datetime import date
 
@@ -118,8 +120,10 @@ def test_run_binance_btc_passes_logical_date(monkeypatch):
 
 def test_run_active_addresses_delegates_to_ingest_latest(monkeypatch):
     calls = []
+    from orchestration.ingest import coinmetrics_btc_active_addresses_ingest
+
     monkeypatch.setattr(
-        pipeline_launch.coinmetrics_btc_active_addresses_ingest,
+        coinmetrics_btc_active_addresses_ingest,
         "ingest_latest",
         lambda: calls.append(True),
     )
@@ -129,8 +133,10 @@ def test_run_active_addresses_delegates_to_ingest_latest(monkeypatch):
 
 def test_run_tx_count_delegates_to_ingest_latest(monkeypatch):
     calls = []
+    from orchestration.ingest import coinmetrics_btc_tx_count_ingest
+
     monkeypatch.setattr(
-        pipeline_launch.coinmetrics_btc_tx_count_ingest,
+        coinmetrics_btc_tx_count_ingest,
         "ingest_latest",
         lambda: calls.append(True),
     )
@@ -140,8 +146,10 @@ def test_run_tx_count_delegates_to_ingest_latest(monkeypatch):
 
 def test_run_trends_delegates_to_ingest_latest(monkeypatch):
     calls = []
+    from orchestration.ingest import google_trends_btc_ingest
+
     monkeypatch.setattr(
-        pipeline_launch.google_trends_btc_ingest,
+        google_trends_btc_ingest,
         "ingest_latest",
         lambda: calls.append(True),
     )
