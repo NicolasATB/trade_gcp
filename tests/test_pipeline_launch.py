@@ -34,8 +34,15 @@ def test_build_dataflow_command_explicit_args():
     assert _value_after(cmd, "--temp_location") == "gs://b/temp"
     assert _value_after(cmd, "--staging_location") == "gs://b/staging"
     assert _value_after(cmd, "--service_account_email") == "sa@x.iam.gserviceaccount.com"
-    # Both bounds equal the logical date → one deterministic, idempotent day.
+    # Single positional arg → end defaults to start (one deterministic day).
     assert _value_after(cmd, "--start_date") == "2026-06-15"
+    assert _value_after(cmd, "--end_date") == "2026-06-15"
+
+
+def test_build_dataflow_command_window():
+    # Distinct start/end → a trailing window is processed (self-heals late days).
+    cmd = pipeline_launch.build_dataflow_command("2026-06-12", "2026-06-15")
+    assert _value_after(cmd, "--start_date") == "2026-06-12"
     assert _value_after(cmd, "--end_date") == "2026-06-15"
 
 
@@ -99,7 +106,7 @@ def test_ingest_callables_accept_ds():
         assert "ds" in inspect.signature(fn).parameters
 
 
-def test_run_binance_btc_passes_logical_date(monkeypatch):
+def test_run_binance_btc_ingests_trailing_window(monkeypatch):
     captured = {}
 
     def fake_ingest(start_date=None, end_date=None, client=None):
@@ -112,10 +119,13 @@ def test_run_binance_btc_passes_logical_date(monkeypatch):
 
     monkeypatch.setattr(binance_btc_ingest, "ingest_daily_candles", fake_ingest)
     pipeline_launch.run_binance_btc(ds="2026-06-15")
-    from datetime import date
+    from datetime import date, timedelta
 
-    assert captured["start_date"] == date(2026, 6, 15)
+    # End = logical date; start = end - lookback (self-healing window, idempotent).
     assert captured["end_date"] == date(2026, 6, 15)
+    assert captured["start_date"] == date(2026, 6, 15) - timedelta(
+        days=pipeline_launch.CANDLE_LOOKBACK_DAYS
+    )
 
 
 def test_run_active_addresses_delegates_to_ingest_latest(monkeypatch):

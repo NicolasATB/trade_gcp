@@ -28,7 +28,11 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 
-from orchestration.pipeline_launch import INGEST_STEPS, build_dataflow_command
+from orchestration.pipeline_launch import (
+    CANDLE_LOOKBACK_DAYS,
+    INGEST_STEPS,
+    build_dataflow_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +146,14 @@ with DAG(
             'trap \'rm -rf "$BUILD"\' EXIT\n'
             'cp -r /opt/airflow/repo/dataflow /opt/airflow/repo/setup.py "$BUILD"/\n'
             'cd "$BUILD"\n'
-            + " ".join(build_dataflow_command("{{ ds }}"))
+            # Process a trailing window so a late candle propagates to silver/gold
+            # on a later run (idempotent MERGE) — matches the ingest look-back.
+            + " ".join(
+                build_dataflow_command(
+                    f"{{{{ macros.ds_add(ds, -{CANDLE_LOOKBACK_DAYS}) }}}}",
+                    "{{ ds }}",
+                )
+            )
             + "\n"
         ),
         execution_timeout=timedelta(minutes=90),  # blocks until the Dataflow job finishes

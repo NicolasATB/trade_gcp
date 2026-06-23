@@ -15,7 +15,15 @@ around :data:`INGEST_STEPS` and :func:`build_dataflow_command`.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+
+# Trailing window (in days) re-processed every run for the candle ingest and the
+# Dataflow launch. Re-fetching/re-computing the last few days is idempotent
+# (MERGE on natural keys) and self-heals gaps: if a day's candle isn't published
+# yet when the DAG fires, the next run's window backfills it — no permanent hole.
+# Also dodges a ccxt edge case where a single-day fetch (since == until) with
+# pagination returns nothing.
+CANDLE_LOOKBACK_DAYS = 3
 
 # NOTE: the ingest modules are imported lazily inside each wrapper below, not at
 # module top level. Importing them eagerly pulls in heavy dependencies (notably
@@ -64,8 +72,11 @@ def _to_date(ds):
 def run_binance_btc(ds=None):
     from orchestration.ingest import binance_btc_ingest
 
-    d = _to_date(ds)
-    binance_btc_ingest.ingest_daily_candles(start_date=d, end_date=d)
+    end = _to_date(ds)
+    # Re-fetch a trailing window (idempotent) so a late/missed daily candle is
+    # backfilled on a later run instead of leaving a permanent gap.
+    start = end - timedelta(days=CANDLE_LOOKBACK_DAYS) if end else None
+    binance_btc_ingest.ingest_daily_candles(start_date=start, end_date=end)
 
 
 def run_mvrv(ds=None):
@@ -151,7 +162,8 @@ INGEST_STEPS = [
 
 
 def build_dataflow_command(
-    ds,
+    start_date,
+    end_date=None,
     project=None,
     region=None,
     temp_location=None,
@@ -161,16 +173,18 @@ def build_dataflow_command(
     """Build the ``python -m dataflow.pipeline`` argv for the daily run.
 
     Launches the full medallion pipeline (conform → rsi → signals) on
-    DataflowRunner for a single logical day. ``--start_date`` and ``--end_date``
-    are both set to ``ds`` so a re-run is deterministic and idempotent (the
-    stages MERGE on natural keys). Right-sized worker defaults are injected by
+    DataflowRunner over ``[start_date, end_date]`` (``end_date`` defaults to
+    ``start_date``). The DAG passes a trailing window (``ds - CANDLE_LOOKBACK_DAYS
+    .. ds``) so a late candle propagates to silver/gold on a later run instead of
+    leaving a gap; every stage MERGEs on natural keys, so re-processing recent
+    days is idempotent. Right-sized worker defaults are injected by
     ``pipeline._apply_worker_defaults``; ``--setup_file ./setup.py`` packages the
-    ``dataflow`` module for the GCP workers (relative path → the DAG runs this
-    with ``cwd=/opt/airflow/repo``).
+    ``dataflow`` module for the GCP workers.
 
     Unset arguments fall back to environment variables (set on the VM via
     ``.env``) and finally to the module defaults.
     """
+    end_date = end_date or start_date
     project = project or os.environ.get("GCP_PROJECT", _DEFAULT_PROJECT)
     region = region or os.environ.get("GCP_REGION", _DEFAULT_REGION)
     temp_location = temp_location or os.environ.get(
@@ -191,6 +205,6 @@ def build_dataflow_command(
         "--temp_location", temp_location,
         "--staging_location", staging_location,
         "--service_account_email", service_account,
-        "--start_date", ds,
-        "--end_date", ds,
+        "--start_date", start_date,
+        "--end_date", end_date,
     ]
