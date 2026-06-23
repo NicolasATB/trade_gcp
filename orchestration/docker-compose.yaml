@@ -34,12 +34,26 @@ x-airflow-common: &airflow-common
     # A single gunicorn worker: the default (4) OOM-kills the webserver on the
     # e2-micro (1 GB). One worker is plenty for a single-user, once-a-day setup.
     AIRFLOW__WEBSERVER__WORKERS: '1'
+    # Cold-booting the webserver under swap on the e2-micro can exceed gunicorn's
+    # default 120s worker timeout, so the master SIGKILLs the worker and the
+    # container flaps in a restart loop. Give the boot room to finish.
+    AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: '300'
+    # Disable the periodic gunicorn worker refresh: spinning up a replacement
+    # worker transiently runs two, doubling webserver memory and OOM-ing the VM.
+    AIRFLOW__WEBSERVER__WORKER_REFRESH_BATCH_SIZE: '0'
     # Keep the footprint small on a tiny VM.
     AIRFLOW__CORE__PARALLELISM: '4'
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '2'
     AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: '1'
     AIRFLOW__SCHEDULER__PARSING_PROCESSES: '1'
     AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: '60'
+    # Generous DAG-parse timeouts. Under swap pressure on the e2-micro a parse can
+    # exceed the defaults (30s import / 50s processor); the scheduler then KILLs the
+    # DagFileProcessor, declares the DAG "missing" and deletes it from
+    # serialized_dag — so it vanishes right after appearing. Raising both keeps the
+    # parse from being killed when the box is busy.
+    AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: '120'
+    AIRFLOW__CORE__DAG_FILE_PROCESSOR_TIMEOUT: '150'
     # Expose the scheduler's HTTP health endpoint on :8974 (the healthcheck below
     # hits it); without this the port stays closed and the container looks
     # unhealthy even though the scheduler is running fine.
@@ -78,14 +92,25 @@ services:
     restart: unless-stopped
     mem_limit: 300m
 
-  # One-shot initializer: applies DB migrations and creates the admin user from
-  # the _AIRFLOW_WWW_USER_* env vars. Exits when done.
+  # One-shot initializer: runs as root (0:0) — not the runtime UID — so it can:
+  #   (a) create and chown the bind-mounted logs/dags/plugins to ${AIRFLOW_UID}:0.
+  #       The host clone owns them as the login user, so the 50000:0 container user
+  #       couldn't write logs and the scheduler's DagFileProcessor crashed. Root
+  #       fixes the ownership before the long-running services start.
+  #   (b) tolerate an arbitrary AIRFLOW_UID. The overridden entrypoint skips the
+  #       image's passwd-registration step, so a UID not baked into the image
+  #       (e.g. a host `id -u`) broke `airflow` with "uid not found"; root is
+  #       always present, so init runs regardless of the chosen UID.
+  # It then migrates the DB and creates the admin user. Exits when done.
   airflow-init:
     <<: *airflow-common
+    user: "0:0"
     entrypoint: /bin/bash
     command:
       - -c
       - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins
         airflow db migrate
         airflow users create \
           --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
@@ -122,9 +147,11 @@ services:
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+      timeout: 20s
+      # Long grace + many retries: the single worker boots slowly under swap on
+      # the e2-micro; declaring it unhealthy too early triggers a restart loop.
+      retries: 10
+      start_period: 120s
     restart: unless-stopped
     mem_limit: 800m
     depends_on:
