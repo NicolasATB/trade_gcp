@@ -27,7 +27,11 @@ RUN pip install --no-cache-dir -r /tmp/airflow-extra-requirements.txt
 #    user can run it at runtime. We drop back to USER airflow afterwards.
 COPY dataflow/requirements.txt /tmp/beam-requirements.txt
 USER root
+# setuptools + wheel are required so Beam's --setup_file can build the dataflow
+# sdist for the workers. Python 3.12 venvs no longer ship setuptools by default
+# and apache-beam doesn't pull it in, so `setup.py sdist` failed with
+# "No module named 'setuptools'" when launching on DataflowRunner.
 RUN python -m venv /opt/beam-venv \
-    && /opt/beam-venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/beam-venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
     && /opt/beam-venv/bin/pip install --no-cache-dir -r /tmp/beam-requirements.txt
 USER airflow
