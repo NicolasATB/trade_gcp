@@ -60,6 +60,11 @@ class CcxtCandleSource:
     # without the block, so the VM keeps the identical BTC/USDT series. Left None
     # for exchanges that need no override (e.g. Bitstamp).
     public_api_url: str | None = None
+    # Optional ccxt ``options`` dict. For Binance we set ``fetchMarkets=['spot']``
+    # so load_markets() only hits the spot exchangeInfo (routed to the vision host
+    # above); without it ccxt also queries the futures (fapi) and delivery (dapi)
+    # endpoints, which are NOT mirrored and still 451 from the VM.
+    options: dict | None = None
 
 
 def _table_fqn(table: str) -> str:
@@ -110,7 +115,10 @@ def fetch_daily_candles_range(
             f"({start_date.isoformat()})."
         )
     if exchange is None:
-        exchange = getattr(ccxt, cfg.exchange_id)({"enableRateLimit": True})
+        ccxt_config = {"enableRateLimit": True}
+        if cfg.options:
+            ccxt_config["options"] = cfg.options
+        exchange = getattr(ccxt, cfg.exchange_id)(ccxt_config)
         if cfg.public_api_url:
             # Route public market-data calls (klines, exchangeInfo) to the
             # override host — see CcxtCandleSource.public_api_url.

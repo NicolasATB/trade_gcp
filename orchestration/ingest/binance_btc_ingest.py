@@ -41,6 +41,9 @@ SOURCE = CcxtCandleSource(
     public_api_url=os.environ.get(
         "BINANCE_PUBLIC_API_URL", "https://data-api.binance.vision/api/v3"
     ),
+    # Load only spot markets so load_markets() doesn't query the futures (fapi) /
+    # delivery (dapi) hosts, which are not on the vision mirror and 451 from the VM.
+    options={"fetchMarkets": ["spot"]},
 )
 
 

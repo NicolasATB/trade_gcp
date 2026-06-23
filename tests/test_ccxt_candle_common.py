@@ -113,7 +113,8 @@ class TestFetchRange:
         captured = {}
 
         class _FakeBinance:
-            def __init__(self, *args, **kwargs):
+            def __init__(self, config=None):
+                captured["config"] = config
                 self.urls = {"api": {"public": "https://api.binance.com/api/v3"}}
 
             def fetch_ohlcv(self, *args, **kwargs):
@@ -124,9 +125,12 @@ class TestFetchRange:
         cfg = CcxtCandleSource(
             "binance", "BTC/USDT", "binance_btcusd_daily_raw", 3,
             public_api_url="https://data-api.binance.vision/api/v3",
+            options={"fetchMarkets": ["spot"]},
         )
         fetch_daily_candles_range(cfg, date(2024, 1, 1), date(2024, 1, 1))  # exchange=None
         assert captured["public"] == "https://data-api.binance.vision/api/v3"
+        # options (spot-only) are forwarded to the ccxt constructor
+        assert captured["config"]["options"] == {"fetchMarkets": ["spot"]}
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +207,9 @@ class TestEntryPointConfig:
         # Public market data is routed to the vision mirror (api.binance.com 451s
         # from cloud IPs); same Binance BTC/USDT series, unblocked from the VM.
         assert s.public_api_url == "https://data-api.binance.vision/api/v3"
+        # Spot-only markets so load_markets() skips the futures/delivery hosts
+        # (fapi/dapi), which are not mirrored and 451 from the VM.
+        assert s.options == {"fetchMarkets": ["spot"]}
 
     def test_bitstamp_config(self):
         s = bitstamp_btc_ingest.SOURCE
