@@ -8,8 +8,8 @@
 # APIs enabled (Compute Engine, IAP for tunneling). Run from Git Bash / Linux.
 #
 # Usage:
-#   ./provision_vm.sh                 # create Cloud NAT + the VM (Docker + 2 GB
-#                                     # swap baked in via the startup script)
+#   ./provision_vm.sh                 # lock down the firewall + create the VM
+#                                     # (Docker + 2 GB swap baked in via startup)
 #   then follow the printed "Next steps" to configure secrets and start Airflow.
 #
 # Auth to GCP is the VM's attached service account (trade-pipeline@…, scope
@@ -19,10 +19,8 @@ set -euo pipefail
 # --- Config (override via env) ------------------------------------------------
 PROJECT="${GCP_PROJECT:-trade-390514}"
 ZONE="${GCP_ZONE:-us-central1-a}"
-REGION="${GCP_REGION:-us-central1}"
 NETWORK="${GCP_NETWORK:-default}"
-ROUTER_NAME="${ROUTER_NAME:-trade-nat-router}"
-NAT_NAME="${NAT_NAME:-trade-nat}"
+IAP_SSH_RULE="${IAP_SSH_RULE:-allow-iap-ssh}"
 VM_NAME="${VM_NAME:-trade-airflow}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-micro}"
 BOOT_DISK_SIZE="${BOOT_DISK_SIZE:-30GB}"
@@ -50,35 +48,35 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 EOS
 
-# --- Cloud NAT (egress for the --no-address VM) -------------------------------
-# The VM is created with --no-address, so it has no public IP and zero internet
-# egress on its own. SSH still works through IAP (Google's internal network),
-# but outbound traffic — the startup script's `curl get.docker.com` and the
-# daily ingest (Binance, FRED, Yahoo, Coin Metrics, bitcoin-data.com, Docker
-# Hub) — needs Cloud NAT. Cloud NAT is preferred over an external IP because the
-# `default` VPC has `default-allow-ssh 0.0.0.0/0`, so a public IP would expose
-# SSH to the internet. Both steps are idempotent.
-if gcloud compute routers describe "$ROUTER_NAME" --region "$REGION" --project "$PROJECT" >/dev/null 2>&1; then
-  echo "Cloud Router '$ROUTER_NAME' already exists in $REGION — skipping."
+# --- Network: egress via external IP + inbound lockdown -----------------------
+# The VM gets an ephemeral EXTERNAL IP (created below — no --no-address) for
+# outbound internet: the startup script's `curl get.docker.com` and the daily
+# ingest (Binance via the vision mirror, FRED, Yahoo, Coin Metrics, Docker Hub).
+# For a single always-on VM an external IP (~$3.6/mo) is ~10x cheaper than Cloud
+# NAT (~$32/mo), so we use it instead of NAT. To keep inbound CLOSED despite the
+# public IP, lock down the default VPC: allow SSH only from IAP (35.235.240.0/20)
+# and delete the world-open SSH/RDP rules. Outbound is allowed by the default
+# egress rule and the stateful firewall lets replies back in, so nothing reaches
+# the VM unsolicited. All steps idempotent.
+if gcloud compute firewall-rules describe "$IAP_SSH_RULE" --project "$PROJECT" >/dev/null 2>&1; then
+  echo "Firewall rule '$IAP_SSH_RULE' already exists — skipping."
 else
-  echo "Creating Cloud Router '$ROUTER_NAME' in $REGION ..."
-  gcloud compute routers create "$ROUTER_NAME" \
+  echo "Creating IAP-only SSH firewall rule '$IAP_SSH_RULE' ..."
+  gcloud compute firewall-rules create "$IAP_SSH_RULE" \
     --project "$PROJECT" \
-    --region "$REGION" \
-    --network "$NETWORK"
+    --network "$NETWORK" \
+    --direction INGRESS --action ALLOW --rules tcp:22 \
+    --source-ranges 35.235.240.0/20 \
+    --description "Allow SSH only from IAP"
 fi
 
-if gcloud compute routers nats describe "$NAT_NAME" --router "$ROUTER_NAME" --region "$REGION" --project "$PROJECT" >/dev/null 2>&1; then
-  echo "Cloud NAT '$NAT_NAME' already exists on '$ROUTER_NAME' — skipping."
-else
-  echo "Creating Cloud NAT '$NAT_NAME' on '$ROUTER_NAME' ..."
-  gcloud compute routers nats create "$NAT_NAME" \
-    --project "$PROJECT" \
-    --router "$ROUTER_NAME" \
-    --region "$REGION" \
-    --auto-allocate-nat-external-ips \
-    --nat-all-subnet-ip-ranges
-fi
+# Remove the default VPC's world-open SSH/RDP (keeps default-allow-internal/icmp).
+for _rule in default-allow-ssh default-allow-rdp; do
+  if gcloud compute firewall-rules describe "$_rule" --project "$PROJECT" >/dev/null 2>&1; then
+    echo "Deleting world-open firewall rule '$_rule' ..."
+    gcloud compute firewall-rules delete "$_rule" --project "$PROJECT" -q
+  fi
+done
 
 # --- Create the VM ------------------------------------------------------------
 if gcloud compute instances describe "$VM_NAME" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
@@ -94,16 +92,16 @@ else
     --boot-disk-size "$BOOT_DISK_SIZE" \
     --service-account "$SA_EMAIL" \
     --scopes cloud-platform \
-    --no-address \
     --metadata startup-script="$STARTUP_SCRIPT"
-  # --no-address keeps the VM off the public internet; SSH goes through IAP.
+  # The VM gets an ephemeral external IP (for egress). Inbound stays closed by
+  # the firewall lockdown above; SSH goes through IAP.
 fi
 
 cat <<NEXT
 
 VM ready. Next steps (run from your machine):
 
-  # 1) SSH in through IAP (no public IP):
+  # 1) SSH in through IAP (inbound is locked down; SSH only via IAP):
   gcloud compute ssh $VM_NAME --zone $ZONE --project $PROJECT --tunnel-through-iap
 
   # On the VM:

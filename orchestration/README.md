@@ -12,7 +12,7 @@ the ingest tasks (`ingest/`) and the alert task (`alerts/`, T-10). Dataflow is
 | `Dockerfile`         | Airflow 2.10.5 image + ingest deps + an isolated Beam venv.    |
 | `requirements.txt`   | Extra deps baked into the Airflow environment.                 |
 | `.env.example`       | Secrets/config template — copy to `.env` on the VM.            |
-| `scripts/provision_vm.sh` | gcloud bootstrap: Cloud NAT, the VM, swap and Docker.     |
+| `scripts/provision_vm.sh` | gcloud bootstrap: firewall lockdown, the VM, swap, Docker. |
 | `ingest/`            | Ingestion modules (imported as `orchestration.ingest.*`).      |
 | `dags/`              | The daily DAG `daily_btc_signal` (T-12).                        |
 | `pipeline_launch.py` | Airflow-free helpers for the DAG (launch command + ingest steps). |
@@ -39,11 +39,13 @@ the ingest tasks (`ingest/`) and the alert task (`alerts/`, T-10). Dataflow is
   There is **no `keys/sa.json`** to upload, mount, manage or rotate, and
   `GOOGLE_APPLICATION_CREDENTIALS` is intentionally left unset (a missing path
   would break ADC). This is the secret-handling approach for T-13.
-- **Egress via Cloud NAT.** The VM has no public IP (`--no-address`), so the
-  bootstrap also creates a Cloud Router + Cloud NAT to give it outbound internet
-  (Docker Hub, the ingest source APIs). NAT is preferred over an external IP
-  because the `default` VPC's `default-allow-ssh 0.0.0.0/0` would otherwise expose
-  SSH; inbound stays closed and SSH goes through IAP.
+- **Egress via an external IP, inbound locked down.** The VM has an ephemeral
+  external IP for outbound internet (Docker Hub, the ingest source APIs). For a
+  single always-on VM that is ~10× cheaper than Cloud NAT (~$3.6 vs ~$32/mo). To
+  keep it safe despite the public IP, `provision_vm.sh` locks the `default` VPC
+  down: SSH is allowed only from IAP (35.235.240.0/20) and the world-open
+  `default-allow-ssh`/`-rdp` rules are removed — inbound stays closed (only
+  replies to outbound return, via the stateful firewall) and SSH goes through IAP.
 - **Secrets never in git.** `.env` (Fernet key, admin password, `FRED_API_KEY`)
   is git-ignored and lives only on the VM.
 
@@ -90,10 +92,10 @@ docker compose exec airflow-scheduler airflow dags trigger daily_btc_signal
 ## Deploy
 
 ```bash
-# 1) Provision Cloud NAT + the VM (Docker + 2 GB swap via startup script):
+# 1) Firewall lockdown + the VM (Docker + 2 GB swap via startup script):
 ./scripts/provision_vm.sh
 
-# 2) SSH in through IAP (the VM has no public IP):
+# 2) SSH in through IAP (inbound locked down; SSH only via IAP):
 gcloud compute ssh trade-airflow --zone us-central1-a --tunnel-through-iap
 
 # On the VM, inside trade_gcp/orchestration:
