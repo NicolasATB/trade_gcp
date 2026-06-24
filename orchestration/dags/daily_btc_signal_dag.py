@@ -28,7 +28,11 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 
-from orchestration.pipeline_launch import INGEST_STEPS, build_dataflow_command
+from orchestration.pipeline_launch import (
+    CANDLE_LOOKBACK_DAYS,
+    INGEST_STEPS,
+    build_dataflow_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +61,39 @@ def _signal_alert(**context):
     )
 
 
+# The only ingest that feeds the signal pipeline (conform → rsi → signals); it
+# gates launch_dataflow. The rest are context series that feed the training views,
+# so they run in parallel but must NOT block the signal.
+_SIGNAL_INGEST_TASK_ID = "ingest_binance_btc"
+
+
 def _make_ingest_callable(fn):
-    """Adapt a pipeline_launch ingest wrapper to an Airflow python_callable."""
+    """Strict callable for the critical (candle) ingest — failures fail the task."""
 
     def _run(**context):
         fn(ds=context.get("ds"))
+
+    return _run
+
+
+def _make_best_effort_callable(fn):
+    """Tolerant callable for context ingests.
+
+    These feed only the training views, and some sources block the VM's cloud IP
+    (e.g. Google Trends 429s from datacenter ranges). A fetch failure is logged
+    but does NOT fail the task, so a flaky context series never reddens the run
+    nor — combined with the dependency wiring below — blocks the daily signal.
+    """
+
+    def _run(**context):
+        try:
+            fn(ds=context.get("ds"))
+        except Exception:  # noqa: BLE001 - best-effort context feed
+            logger.warning(
+                "context ingest failed (non-blocking) for ds=%s",
+                context.get("ds"),
+                exc_info=True,
+            )
 
     return _run
 
@@ -71,7 +103,10 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
-    "execution_timeout": timedelta(minutes=20),
+    # Generous on purpose: on the e2-micro a single ingest can crawl under swap.
+    # With MAX_ACTIVE_TASKS_PER_DAG=1 tasks run serially, so this caps a genuinely
+    # stuck task without tripping on mere slowness.
+    "execution_timeout": timedelta(minutes=45),
     "on_failure_callback": _alert_on_failure,
 }
 
@@ -85,20 +120,43 @@ with DAG(
     default_args=default_args,
     tags=["trade", "btc", "rsi"],
 ) as dag:
-    ingest_tasks = [
-        PythonOperator(task_id=task_id, python_callable=_make_ingest_callable(fn))
-        for task_id, fn in INGEST_STEPS
-    ]
+    signal_ingest = None
+    context_ingests = []
+    for task_id, fn in INGEST_STEPS:
+        if task_id == _SIGNAL_INGEST_TASK_ID:
+            signal_ingest = PythonOperator(
+                task_id=task_id, python_callable=_make_ingest_callable(fn)
+            )
+        else:
+            context_ingests.append(
+                PythonOperator(
+                    task_id=task_id, python_callable=_make_best_effort_callable(fn)
+                )
+            )
 
     # Launch the medallion pipeline on Dataflow with the isolated Beam venv.
-    # cd into the repo root so the relative --setup_file ./setup.py resolves.
+    # --setup_file makes Beam build an sdist of the dataflow package, which writes
+    # build artifacts (*.egg-info) next to setup.py. The repo is mounted read-only,
+    # so copy setup.py + the package into a writable temp dir and launch from there.
     launch_dataflow = BashOperator(
         task_id="launch_dataflow",
         bash_command=(
-            "cd /opt/airflow/repo && "
-            + " ".join(build_dataflow_command("{{ ds }}"))
+            "set -euo pipefail\n"
+            'BUILD="$(mktemp -d)"\n'
+            'trap \'rm -rf "$BUILD"\' EXIT\n'
+            'cp -r /opt/airflow/repo/dataflow /opt/airflow/repo/setup.py "$BUILD"/\n'
+            'cd "$BUILD"\n'
+            # Process a trailing window so a late candle propagates to silver/gold
+            # on a later run (idempotent MERGE) — matches the ingest look-back.
+            + " ".join(
+                build_dataflow_command(
+                    f"{{{{ macros.ds_add(ds, -{CANDLE_LOOKBACK_DAYS}) }}}}",
+                    "{{ ds }}",
+                )
+            )
+            + "\n"
         ),
-        execution_timeout=timedelta(minutes=40),
+        execution_timeout=timedelta(minutes=90),  # blocks until the Dataflow job finishes
         retries=1,  # MERGE is idempotent, so a single re-launch is safe.
     )
 
@@ -107,4 +165,6 @@ with DAG(
         python_callable=_signal_alert,
     )
 
-    ingest_tasks >> launch_dataflow >> signal_alert
+    # Critical path: the candle gates Dataflow, which gates the alert. Context
+    # ingests run in parallel (best-effort) and do not gate the signal.
+    signal_ingest >> launch_dataflow >> signal_alert

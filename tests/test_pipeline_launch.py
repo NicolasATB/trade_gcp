@@ -34,8 +34,15 @@ def test_build_dataflow_command_explicit_args():
     assert _value_after(cmd, "--temp_location") == "gs://b/temp"
     assert _value_after(cmd, "--staging_location") == "gs://b/staging"
     assert _value_after(cmd, "--service_account_email") == "sa@x.iam.gserviceaccount.com"
-    # Both bounds equal the logical date → one deterministic, idempotent day.
+    # Single positional arg → end defaults to start (one deterministic day).
     assert _value_after(cmd, "--start_date") == "2026-06-15"
+    assert _value_after(cmd, "--end_date") == "2026-06-15"
+
+
+def test_build_dataflow_command_window():
+    # Distinct start/end → a trailing window is processed (self-heals late days).
+    cmd = pipeline_launch.build_dataflow_command("2026-06-12", "2026-06-15")
+    assert _value_after(cmd, "--start_date") == "2026-06-12"
     assert _value_after(cmd, "--end_date") == "2026-06-15"
 
 
@@ -99,27 +106,34 @@ def test_ingest_callables_accept_ds():
         assert "ds" in inspect.signature(fn).parameters
 
 
-def test_run_binance_btc_passes_logical_date(monkeypatch):
+def test_run_binance_btc_ingests_trailing_window(monkeypatch):
     captured = {}
 
     def fake_ingest(start_date=None, end_date=None, client=None):
         captured["start_date"] = start_date
         captured["end_date"] = end_date
 
-    monkeypatch.setattr(
-        pipeline_launch.binance_btc_ingest, "ingest_daily_candles", fake_ingest
-    )
-    pipeline_launch.run_binance_btc(ds="2026-06-15")
-    from datetime import date
+    # The wrapper imports the module lazily; patch it at the source so the
+    # in-function ``from orchestration.ingest import ...`` picks up the fake.
+    from orchestration.ingest import binance_btc_ingest
 
-    assert captured["start_date"] == date(2026, 6, 15)
+    monkeypatch.setattr(binance_btc_ingest, "ingest_daily_candles", fake_ingest)
+    pipeline_launch.run_binance_btc(ds="2026-06-15")
+    from datetime import date, timedelta
+
+    # End = logical date; start = end - lookback (self-healing window, idempotent).
     assert captured["end_date"] == date(2026, 6, 15)
+    assert captured["start_date"] == date(2026, 6, 15) - timedelta(
+        days=pipeline_launch.CANDLE_LOOKBACK_DAYS
+    )
 
 
 def test_run_active_addresses_delegates_to_ingest_latest(monkeypatch):
     calls = []
+    from orchestration.ingest import coinmetrics_btc_active_addresses_ingest
+
     monkeypatch.setattr(
-        pipeline_launch.coinmetrics_btc_active_addresses_ingest,
+        coinmetrics_btc_active_addresses_ingest,
         "ingest_latest",
         lambda: calls.append(True),
     )
@@ -129,8 +143,10 @@ def test_run_active_addresses_delegates_to_ingest_latest(monkeypatch):
 
 def test_run_tx_count_delegates_to_ingest_latest(monkeypatch):
     calls = []
+    from orchestration.ingest import coinmetrics_btc_tx_count_ingest
+
     monkeypatch.setattr(
-        pipeline_launch.coinmetrics_btc_tx_count_ingest,
+        coinmetrics_btc_tx_count_ingest,
         "ingest_latest",
         lambda: calls.append(True),
     )
@@ -140,8 +156,10 @@ def test_run_tx_count_delegates_to_ingest_latest(monkeypatch):
 
 def test_run_trends_delegates_to_ingest_latest(monkeypatch):
     calls = []
+    from orchestration.ingest import google_trends_btc_ingest
+
     monkeypatch.setattr(
-        pipeline_launch.google_trends_btc_ingest,
+        google_trends_btc_ingest,
         "ingest_latest",
         lambda: calls.append(True),
     )

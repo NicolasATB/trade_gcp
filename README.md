@@ -292,11 +292,15 @@ Until then IAM has two sources of truth — assumed and documented, not an overs
 4. **Infrastructure (Terraform).** Provision the BigQuery datasets and the e2-micro
    VM from `terraform_infra/` (`terraform init && plan && apply`).
 5. **Airflow on the VM.** Provision the VM and bring up Airflow (LocalExecutor +
-   Postgres, ~1 GB RAM + 2 GB swap; Beam runs in an isolated venv). Secrets go in
-   `.env` + a mounted `keys/sa.json`, never committed.
+   Postgres, ~1 GB RAM + 2 GB swap; Beam runs in an isolated venv). GCP auth uses
+   the VM's **attached service account** via the metadata server (ADC) — no key
+   file. The only secrets are in `.env` (Fernet key, admin password,
+   `FRED_API_KEY`), never committed. The VM has an ephemeral external IP for
+   egress (~10× cheaper than Cloud NAT for one VM); `provision_vm.sh` locks the
+   firewall down so inbound is closed and SSH goes through IAP.
    ```bash
    cd orchestration
-   ./scripts/provision_vm.sh            # create the VM (gcloud bootstrap)
+   ./scripts/provision_vm.sh            # firewall lockdown + the VM (gcloud bootstrap)
    # then, on the VM:
    cp .env.example .env                  # fill in real secrets
    docker compose build
