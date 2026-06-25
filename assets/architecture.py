@@ -8,6 +8,23 @@ versioned and reproducible instead of a one-off manual export. Regenerate with:
 Requires Graphviz (the ``dot`` binary) on PATH and the ``diagrams`` package
 (``pip install diagrams``). On Windows, Graphviz installs to
 ``C:\\Program Files\\Graphviz\\bin``; this script adds it to PATH automatically.
+
+Layering convention (KEEP THIS — top→bottom layers, the standard cloud
+architecture style). The diagram is ``direction="TB"`` and every node lives in
+exactly one horizontal layer cluster, ordered top to bottom:
+
+    1. Users & external endpoints  — clients, external APIs, DNS/CDN, the
+       user-facing sinks (here: market-data sources, Telegram, Looker Studio).
+    2. Application / logic         — services, APIs, serverless, containers
+       (here: the Airflow VM operators + Dataflow/Beam).
+    3. Data & platform            — databases, queues, caches, object storage
+       (here: BigQuery + Cloud Storage).
+    4. Base infrastructure & IaC  — VPC/subnets, firewalls, IAM, and the
+       provisioning tooling (here: Terraform, GitHub, CI) that underpins it all.
+
+When adding a node, place it in the layer it belongs to; never put IaC on top.
+Downward edges (constraint=True) lock the layer order; cross-layer data-flow
+edges use constraint=False so they don't disturb the ranking.
 """
 
 from __future__ import annotations
@@ -40,8 +57,8 @@ GRAPH_ATTR = {
     "labelloc": "t",
     "bgcolor": "white",
     "pad": "1.2",
-    "nodesep": "0.6",
-    "ranksep": "1.1",
+    "nodesep": "1.1",
+    "ranksep": "1.7",
     "splines": "spline",
     "compound": "true",
 }
@@ -63,58 +80,57 @@ with Diagram(
     filename=_OUT,
     outformat="png",
     show=False,
-    direction="LR",
+    direction="TB",
     graph_attr=GRAPH_ATTR,
     node_attr=NODE_ATTR,
     edge_attr=EDGE_ATTR,
 ):
-    # Source / IaC / CI — declared first and chained left→right so it renders as
-    # a horizontal band on top, provisioning the rest (dashed edges below).
-    with Cluster("Source · IaC · CI", graph_attr=CLUSTER_ATTR):
-        repo = Github("GitHub")
-        ci = GithubActions("CI\nruff + pytest")
-        iac = Terraform("Terraform\n(IaC)")
-        repo >> Edge(color="#5f6368") >> ci          # push triggers CI
-        ci >> Edge(style="invis") >> iac             # layout only: keep the row horizontal
+    # ---- LAYER 1 (top): users & external endpoints -----------------------
+    with Cluster("Users & external endpoints", graph_attr=CLUSTER_ATTR):
+        sources = Internet("Market-data APIs\n(Binance · FRED ·\nCoin Metrics · Yahoo)")
+        telegram = Telegram("Telegram\nalert on change")
+        looker = Looker("Looker Studio\nQA dashboard")
 
-    sources = Internet("Market-data APIs\n(Binance · Bitstamp · FRED ·\nCoin Metrics · Yahoo/Tiingo)")
-
-    with Cluster("e2-micro VM — Compute Engine (Airflow)", graph_attr=CLUSTER_ATTR):
-        scheduler = Airflow("Airflow\nscheduler")
-        ingest = Python("Ingest\nPythonOperator")
-        # Alert is also a PythonOperator orchestrated by Airflow on the VM.
-        alert = Python("Alert\nPythonOperator")
-        scheduler >> Edge(color="#5f6368", constraint="false") >> ingest
-        scheduler >> Edge(color="#5f6368", constraint="false") >> alert
-
-    with Cluster("Managed GCP services", graph_attr=CLUSTER_ATTR):
-        bq = Bigquery("BigQuery\nmedallion\nbronze → silver → gold")
+    # ---- LAYER 2: application / logic (compute) --------------------------
+    with Cluster("Application / logic", graph_attr=CLUSTER_ATTR):
+        with Cluster("e2-micro VM — Compute Engine (Airflow)", graph_attr=CLUSTER_ATTR):
+            ingest = Python("Ingest\nPythonOperator")
+            scheduler = Airflow("Airflow\nscheduler")
+            # Alert is also a PythonOperator orchestrated by Airflow on the VM.
+            alert = Python("Alert\nPythonOperator")
         df = Dataflow("Dataflow\n(Apache Beam)")
+
+    # ---- LAYER 3: data & platform ----------------------------------------
+    with Cluster("Data & platform", graph_attr=CLUSTER_ATTR):
+        bq = Bigquery("BigQuery — medallion\nbronze → silver → gold")
         gcs = GCS("Cloud Storage\ntemp_location")
 
-    telegram = Telegram("Telegram\nalert on change")
-    looker = Looker("Looker Studio\nQA dashboard")  # consumes the gold views
+    # ---- LAYER 4 (bottom): base infrastructure & IaC ---------------------
+    with Cluster("Base infrastructure & IaC", graph_attr=CLUSTER_ATTR):
+        iac = Terraform("Terraform\n(BigQuery + VM)")
+        repo = Github("GitHub")
+        ci = GithubActions("CI\nruff + pytest")
+        repo >> Edge(color="#5f6368", constraint="false") >> ci   # push triggers CI
 
-    # --- Data flow: constraining edges define the left→right ranks ---
-    #   sources | VM (scheduler+ingest+alert) | bq+df+gcs | telegram+looker
-    sources >> DATA >> ingest
+    # --- Constraining edges (downward) lock the four layers top→bottom ---
+    sources >> Edge(color="#4285F4", label="download") >> ingest
     ingest >> Edge(color="#4285F4", label="raw candles +\ncontext series") >> bq
-    scheduler >> Edge(color="#4285F4", label="launch") >> df
-    bq >> Edge(color="#A142F4", label="gold training +\nmonitor views") >> looker
+    bq >> Edge(style="invis") >> iac   # layout only: anchor the IaC layer at the bottom
 
-    # Alert stays inside the VM cluster, so its signal edges don't constrain rank
-    # (otherwise the cluster box would span ranks and overlap the GCP one).
-    bq >> Edge(color="#4285F4", label="last signal", constraint="false") >> alert
-    alert >> Edge(color="#34A853", label="send only if changed", constraint="false") >> telegram
-    bq >> Edge(style="invis") >> telegram   # layout only: anchor telegram to the right
-
-    # --- Same-rank / return / provisioning edges: constraint="false" ---
+    # --- Cross-layer data flow (constraint=false so it doesn't move ranks) ---
+    scheduler >> Edge(color="#4285F4", label="launch", constraint="false") >> df
     df >> Edge(color="#4285F4", label="read OHLCV + params /\nwrite RSI + signal", constraint="false") >> bq
     bq >> Edge(color="#4285F4", constraint="false") >> df
+    bq >> Edge(color="#4285F4", label="last signal", constraint="false") >> alert
+    alert >> Edge(color="#34A853", label="send only if changed", constraint="false") >> telegram
+    bq >> Edge(color="#A142F4", label="gold training +\nmonitor views", constraint="false") >> looker
+
     # GCS temp_location is the staging intermediary for BigQuery I/O: reads
     # export to GCS, writes stage temp files there for the FILE_LOADS load job.
     df >> Edge(color="#9aa0a6", style="dashed", label="temp files", constraint="false") >> gcs
     gcs >> Edge(color="#9aa0a6", style="dashed", dir="both",
                 label="FILE_LOADS /\nexport staging", constraint="false") >> bq
+
+    # --- Provisioning (dashed, upward from the IaC layer) ---
     iac >> Edge(color="#9aa0a6", style="dashed", constraint="false") >> bq
     iac >> Edge(color="#9aa0a6", style="dashed", constraint="false") >> scheduler
