@@ -11,6 +11,8 @@ infrastructure the project will finally implement **Strategy 3**, its end goal: 
 > ⚠️ **Disclaimer — not financial advice.** The signal logic is a technical/educational
 > example; the value is in the data engineering, not any expectation of returns.
 
+![Architecture — Quantitative Trading-Signal Pipeline on GCP](./assets/architecture.png)
+
 ---
 
 ## Table of contents
@@ -36,27 +38,10 @@ infrastructure the project will finally implement **Strategy 3**, its end goal: 
 | Infrastructure   | Terraform                            | Defines BigQuery + VM as code (IaC)                       |
 | CI/CD            | GitHub Actions                       | ruff lint + pytest on every push                          |
 
-```mermaid
-flowchart LR
-    SCHED["Airflow scheduler<br/>(@daily, on the VM)"] --> ING
-    subgraph VM["e2-micro VM (Airflow)"]
-        ING["Ingest<br/>PythonOperator"]
-        ALERT["Alert<br/>PythonOperator"]
-    end
-    subgraph GCP["Managed GCP services"]
-        BQ[("BigQuery<br/>medallion")]
-        DF["Dataflow<br/>(Apache Beam)"]
-    end
-    ING -->|raw candle| BQ
-    ING --> DF
-    DF -->|reads OHLCV + params| BQ
-    DF -->|writes RSI + signal| BQ
-    BQ -->|last signal| ALERT
-    ALERT -->|"send only if changed"| TG["Telegram"]
-```
-
-Ingest and alert run as `PythonOperator`s on the VM; **Dataflow does not** — Airflow
-only *launches* it, and the job runs on managed GCP workers.
+The [architecture diagram](#quantitative-trading-signal-pipeline-on-gcp) above (official
+GCP icons, generated as code with [`assets/architecture.py`](assets/architecture.py))
+shows the daily flow. Ingest and alert run as `PythonOperator`s on the VM; **Dataflow
+does not** — Airflow only *launches* it, and the job runs on managed GCP workers.
 
 ---
 
@@ -114,8 +99,8 @@ count** (14); **Google Trends** attention (weekly, 15 — bronze keeps the **raw
 per-window 0-100, the **stitched** series being the silver view
 `vw_google_trends_btc_weekly`). For **Strategy 3**, eight ETFs
 (SPY/EFA·IEF/TLT·GLD/DBC·UUP/FXY) land via **two sources competing by `priority`** —
-Yahoo (16, primary) + stooq (17, fallback) — into `yahoo_etf_daily_raw` /
-`stooq_etf_daily_raw` (keyed `(symbol, candle_date)`); BTC reuses spot. `coinapi_*` / `investing_*` DDL ready, ingestion pending.
+Yahoo (16, primary, keyless) + Tiingo (17, fallback, token) — into `yahoo_etf_daily_raw` /
+`tiingo_etf_daily_raw` (keyed `(symbol, candle_date)`); BTC reuses spot. `coinapi_*` / `investing_*` DDL ready, ingestion pending.
 
 **Silver.** `ohlcv_validated` = typed, de-duplicated OHLCV (`1d` + `1w`).
 `rsi_features` = Wilder RSI with recursive state for `1d`/`1w` (idempotent incremental

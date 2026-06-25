@@ -6,10 +6,10 @@ current-UTC-day bar, and the idempotent ``MERGE`` on the natural key
 ``(symbol, candle_date)`` (chunked under BigQuery's 4000-partitions-per-DML cap).
 It is **not an entry-point**.
 
-Both ETF ingests (``yahoo_etf_ingest`` over Yahoo Finance, ``stooq_etf_ingest``
-over stooq) share one bronze schema and one upsert, so a fix lands once for both;
+Both ETF ingests (``yahoo_etf_ingest`` over Yahoo Finance, ``tiingo_etf_ingest``
+over Tiingo) share one bronze schema and one upsert, so a fix lands once for both;
 only the fetch/parse (the provider-specific part, in ``yahoo_common`` /
-``stooq_common``) and the config (target table, ``source_id``) differ. The two
+``tiingo_common``) and the config (target table, ``source_id``) differ. The two
 sources compete by ``priority`` in the silver consolidation (T-21), so they write
 to separate per-source tables with the identical shape.
 

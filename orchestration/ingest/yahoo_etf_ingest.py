@@ -3,7 +3,7 @@
 Downloads the daily OHLC bars for the eight non-crypto ETFs of the frozen T-19
 universe (``orchestration.ingest.strategy_3_universe.ETF_UNIVERSE``) from Yahoo Finance and
 upserts them into ``prod_trade_bronze.yahoo_etf_daily_raw``. Yahoo is the
-**primary** source for these classes; ``stooq_etf_ingest`` is the competing
+**primary** source for these classes; ``tiingo_etf_ingest`` is the competing
 fallback (the two sources compete by ``priority`` in the silver consolidation,
 T-21). Strategy 3 (cross-asset TSMOM); BTC reuses the existing spot ingest.
 
@@ -11,7 +11,7 @@ Thin entry-point: the provider-specific fetch/parse lives in ``yahoo_common`` an
 the provider-agnostic row mapping + idempotent MERGE on ``(symbol, candle_date)``
 in ``ohlcv_bronze_common``. This module only pins the config (target table,
 ``source_id``) and drives the universe. Bronze is raw — no stitching/dedup here;
-the Yahoo↔stooq consolidation is a downstream silver step.
+the Yahoo↔Tiingo consolidation is a downstream silver step.
 
 Two entry points share one idempotent upsert:
 

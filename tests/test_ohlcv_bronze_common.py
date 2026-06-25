@@ -153,8 +153,8 @@ class TestUpsertChunking:
 
     def test_target_table_is_in_every_query(self):
         client = _FakeClient()
-        upsert_rows(client, "stooq_etf_daily_raw", _rows(5), chunk_size=2)
-        assert all("MERGE" in q and "stooq_etf_daily_raw" in q for q in client.queries)
+        upsert_rows(client, "tiingo_etf_daily_raw", _rows(5), chunk_size=2)
+        assert all("MERGE" in q and "tiingo_etf_daily_raw" in q for q in client.queries)
 
     def test_default_chunk_size_is_under_dml_cap(self):
         assert ohlcv.MAX_MERGE_PARTITIONS <= 4000
@@ -169,32 +169,32 @@ class TestDdlContract:
     def ddl(self):
         return _DDL_PATH.read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "stooq_etf_daily_raw"])
+    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "tiingo_etf_daily_raw"])
     def test_table_declared(self, ddl, table):
         assert f"prod_trade_bronze.{table}" in ddl
 
-    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "stooq_etf_daily_raw"])
+    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "tiingo_etf_daily_raw"])
     def test_partitioned_by_month(self, ddl, table):
         block = ddl.split(table, 1)[1]
         assert "PARTITION BY DATE_TRUNC(candle_date, MONTH)" in block
 
-    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "stooq_etf_daily_raw"])
+    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "tiingo_etf_daily_raw"])
     def test_clustered_by_symbol(self, ddl, table):
         block = ddl.split(table, 1)[1]
         assert "CLUSTER BY symbol" in block
 
-    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "stooq_etf_daily_raw"])
+    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "tiingo_etf_daily_raw"])
     def test_natural_key_is_symbol_candle_date(self, ddl, table):
         block = ddl.split(table, 1)[1]
         assert "PRIMARY KEY (symbol, candle_date) NOT ENFORCED" in block
 
-    def test_yahoo_source_16_outranks_stooq_17(self, ddl):
-        # Yahoo (16) is primary with the higher priority; stooq (17) is fallback.
+    def test_yahoo_source_16_outranks_tiingo_17(self, ddl):
+        # Yahoo (16) is primary with the higher priority; Tiingo (17) is fallback.
         assert "SELECT 16 AS source_id" in ddl
         assert "SELECT 17 AS source_id" in ddl
-        # Yahoo seeds priority 2 (active), stooq priority 1 (relative order is
-        # what matters). stooq is seeded is_active = FALSE: its keyless CSV is
-        # gated behind a JS proof-of-work bot challenge, so the fallback table
-        # stays empty and Yahoo is the effective source.
+        # Yahoo seeds priority 2, Tiingo priority 1 (relative order is what
+        # matters). Both are active: Tiingo is a token API (free TIINGO_API_KEY),
+        # reachable from cloud IPs, so the fallback table is populated and the
+        # T-21 failover is real.
         assert re.search(r"VALUES \(16,.*?,\s*2,\s*TRUE", ddl)
-        assert re.search(r"VALUES \(17,.*?,\s*1,\s*FALSE", ddl)
+        assert re.search(r"VALUES \(17,.*?,\s*1,\s*TRUE", ddl)
