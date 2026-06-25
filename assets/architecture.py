@@ -96,9 +96,11 @@ with Diagram(
     with Cluster("Application / logic", graph_attr=CLUSTER_ATTR):
         with Cluster("e2-micro VM — Compute Engine (Airflow)", graph_attr=CLUSTER_ATTR) as vm_box:
             ingest = Python("Ingest\nPythonOperator")
-            scheduler = Airflow("Airflow\nscheduler")
             # Alert is also a PythonOperator orchestrated by Airflow on the VM.
             alert = Python("Alert\nPythonOperator")
+            # Scheduler is right-most so its "launch" edge to Dataflow is a short
+            # horizontal hop into the adjacent box.
+            scheduler = Airflow("Airflow\nscheduler")
         # Dataflow runs on managed GCP workers; Airflow only launches it. Its own
         # box makes the orchestration boundary explicit.
         with Cluster("Managed Dataflow (Apache Beam)", graph_attr=CLUSTER_ATTR) as df_box:
@@ -127,16 +129,20 @@ with Diagram(
     bq >> Edge(style="invis") >> iac   # layout only: anchor the IaC layer at the bottom
 
     # --- Cross-layer data flow (constraint=false so it doesn't move ranks) ---
-    scheduler >> Edge(color="#4285F4", label="launch /\norchestrate", constraint="false",
-                      ltail=vm_box.name, lhead=df_box.name) >> df
+    # launch/orchestrate: horizontal arrow from the scheduler to Dataflow (same
+    # layer). Node→node with east→west ports keeps it flat (cluster clipping
+    # pushed it up over the top, so no lhead/ltail here).
+    scheduler >> Edge(color="#4285F4", label="launch", constraint="false",
+                      tailport="e", headport="w") >> df
     df >> Edge(color="#4285F4", label="read OHLCV + params /\nwrite RSI + signal",
                dir="both", constraint="false", ltail=df_box.name, lhead=data_box.name) >> bq
     bq >> Edge(color="#4285F4", label="last signal", constraint="false",
-               ltail=data_box.name, lhead=vm_box.name) >> alert
+               ltail=data_box.name, lhead=vm_box.name, tailport="n", headport="s") >> alert
     alert >> Edge(color="#34A853", label="send only if changed", constraint="false",
                   ltail=vm_box.name, lhead=out_box.name) >> telegram
-    bq >> Edge(color="#A142F4", label="gold training +\nmonitor views",
-               constraint="false", tailport="e", ltail=data_box.name, lhead=out_box.name) >> looker
+    # gold views: hug the RIGHT margin (leave bq east, enter outputs box east).
+    bq >> Edge(color="#A142F4", label="gold training +\nmonitor views", constraint="false",
+               ltail=data_box.name, lhead=out_box.name, tailport="e", headport="e") >> looker
 
     # GCS temp_location is the staging intermediary for BigQuery I/O: reads
     # export to GCS, writes stage temp files there for the FILE_LOADS load job.
@@ -145,8 +151,9 @@ with Diagram(
     gcs >> Edge(color="#9aa0a6", style="dashed", dir="both",
                 label="FILE_LOADS /\nexport staging", constraint="false") >> bq
 
-    # --- Provisioning (dashed) — leave the IaC box and enter from the LEFT ---
+    # --- Provisioning (dashed) — hug the LEFT margin, enter the boxes from west.
+    # Terraform provisions the VM + BigQuery (target the boxes, not single nodes).
     iac >> Edge(color="#9aa0a6", style="dashed", constraint="false",
-                ltail=iac_box.name, headport="w") >> bq
+                ltail=iac_box.name, lhead=data_box.name, tailport="w", headport="w") >> bq
     iac >> Edge(color="#9aa0a6", style="dashed", constraint="false",
-                ltail=iac_box.name, headport="w") >> scheduler
+                ltail=iac_box.name, lhead=vm_box.name, tailport="w", headport="w") >> ingest
