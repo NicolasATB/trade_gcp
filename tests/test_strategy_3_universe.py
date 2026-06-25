@@ -49,15 +49,15 @@ class TestEtfMembers:
     def test_have_both_provider_tickers(self):
         for i in ETF_UNIVERSE:
             assert i.yahoo_ticker, f"{i.symbol} missing yahoo_ticker"
-            assert i.stooq_ticker, f"{i.symbol} missing stooq_ticker"
+            assert i.tiingo_ticker, f"{i.symbol} missing tiingo_ticker"
 
     def test_yahoo_ticker_matches_symbol(self):
         # For these ETFs the Yahoo ticker is the canonical symbol.
         assert all(i.yahoo_ticker == i.symbol for i in ETF_UNIVERSE)
 
-    def test_stooq_ticker_is_us_lowercase(self):
-        for i in ETF_UNIVERSE:
-            assert i.stooq_ticker == f"{i.symbol.lower()}.us"
+    def test_tiingo_ticker_matches_symbol(self):
+        # Tiingo uses the plain ticker, identical to the canonical symbol.
+        assert all(i.tiingo_ticker == i.symbol for i in ETF_UNIVERSE)
 
     def test_inception_dates_are_real_dates(self):
         assert all(isinstance(i.inception, date) for i in ETF_UNIVERSE)
@@ -79,7 +79,7 @@ class TestCryptoSleeve:
         # BTC is sourced by the existing spot ingest, not the ETF providers.
         (btc,) = CRYPTO_UNIVERSE
         assert btc.yahoo_ticker is None
-        assert btc.stooq_ticker is None
+        assert btc.tiingo_ticker is None
 
     def test_btc_sets_the_common_portfolio_start(self):
         (btc,) = CRYPTO_UNIVERSE

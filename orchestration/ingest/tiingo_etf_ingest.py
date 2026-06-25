@@ -1,16 +1,16 @@
-"""Multi-asset ETF ingestion: stooq daily CSV -> BigQuery bronze (fallback).
+"""Multi-asset ETF ingestion: Tiingo daily EOD -> BigQuery bronze (fallback).
 
 Downloads the daily OHLC bars for the eight non-crypto ETFs of the frozen T-19
-universe (``orchestration.ingest.strategy_3_universe.ETF_UNIVERSE``) from stooq and upserts
-them into ``prod_trade_bronze.stooq_etf_daily_raw``. stooq is the **fallback**
-source for these classes (``yahoo_etf_ingest`` is primary); the two compete by
-``priority`` in the silver consolidation (T-21), so a source that starts gapping
-fails over to the other. Strategy 3 (cross-asset TSMOM).
+universe (``orchestration.ingest.strategy_3_universe.ETF_UNIVERSE``) from Tiingo and
+upserts them into ``prod_trade_bronze.tiingo_etf_daily_raw``. Tiingo is the
+**fallback** source for these classes (``yahoo_etf_ingest`` is primary); the two
+compete by ``priority`` in the silver consolidation (T-21), so a source that
+starts gapping fails over to the other. Strategy 3 (cross-asset TSMOM).
 
-Thin entry-point: the provider-specific fetch/parse lives in ``stooq_common`` and
+Thin entry-point: the provider-specific fetch/parse lives in ``tiingo_common`` and
 the provider-agnostic row mapping + idempotent MERGE on ``(symbol, candle_date)``
 in ``ohlcv_bronze_common``. This module only pins the config (target table,
-``source_id``) and drives the universe. Bronze is raw — the Yahoo↔stooq
+``source_id``) and drives the universe. Bronze is raw — the Yahoo↔Tiingo
 consolidation is a downstream silver step, not done here.
 
 Same shape as ``yahoo_etf_ingest``: ``--backfill`` (full history) /
@@ -18,14 +18,14 @@ Same shape as ``yahoo_etf_ingest``: ``--backfill`` (full history) /
 current-UTC-day bar is dropped; the next run settles it (idempotent MERGE). The
 table partitions by ``DATE_TRUNC(candle_date, MONTH)`` (10000-partitions cap).
 
-Authentication: none for stooq; Google Application Default Credentials for
-BigQuery.
+Authentication: a free Tiingo API token in ``TIINGO_API_KEY`` (never committed);
+Google Application Default Credentials for BigQuery.
 
 Run standalone:
-  python -m orchestration.ingest.stooq_etf_ingest --backfill                 # full history, all ETFs
-  python -m orchestration.ingest.stooq_etf_ingest --start 2026-06-01 --end 2026-06-10
-  python -m orchestration.ingest.stooq_etf_ingest --symbol SPY --backfill    # one ETF
-  python -m orchestration.ingest.stooq_etf_ingest                            # recent window (daily)
+  python -m orchestration.ingest.tiingo_etf_ingest --backfill                 # full history, all ETFs
+  python -m orchestration.ingest.tiingo_etf_ingest --start 2026-06-01 --end 2026-06-10
+  python -m orchestration.ingest.tiingo_etf_ingest --symbol SPY --backfill    # one ETF
+  python -m orchestration.ingest.tiingo_etf_ingest                            # recent window (daily)
 """
 
 from __future__ import annotations
@@ -38,16 +38,21 @@ from datetime import date, datetime, timedelta, timezone
 from google.cloud import bigquery
 
 from orchestration.ingest import ohlcv_bronze_common as ohlcv
-from orchestration.ingest import stooq_common
+from orchestration.ingest import tiingo_common
 from orchestration.ingest.strategy_3_universe import ETF_UNIVERSE, Instrument
 
 logger = logging.getLogger(__name__)
 
 # --- Configuration (overridable via environment variables) -------------------
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "trade-390514")
-BQ_TABLE = os.environ.get("BQ_STOOQ_ETF_TABLE", "stooq_etf_daily_raw")
-SOURCE_ID = int(os.environ.get("STOOQ_ETF_SOURCE_ID", "17"))
-DAILY_LOOKBACK_DAYS = int(os.environ.get("STOOQ_ETF_DAILY_LOOKBACK_DAYS", "10"))
+BQ_TABLE = os.environ.get("BQ_TIINGO_ETF_TABLE", "tiingo_etf_daily_raw")
+SOURCE_ID = int(os.environ.get("TIINGO_ETF_SOURCE_ID", "17"))
+DAILY_LOOKBACK_DAYS = int(os.environ.get("TIINGO_ETF_DAILY_LOOKBACK_DAYS", "10"))
+# Tiingo returns ONLY the latest bar when startDate is omitted, so the back-fill
+# must pass an explicit early start (before SPY's 1993 inception) to pull the full
+# history. (stooq returned full history with no bounds; Tiingo does not.) Tiingo
+# clamps to each ticker's first available bar, so an early floor is safe.
+BACKFILL_START_DATE = date.fromisoformat(os.environ.get("TIINGO_ETF_BACKFILL_START", "1990-01-01"))
 
 
 def _instruments(symbol: str | None = None) -> tuple[Instrument, ...]:
@@ -70,21 +75,21 @@ def _ingest_instruments(
     client: bigquery.Client,
     today: date | None = None,
 ) -> list[dict]:  # pragma: no cover - live network
-    """Fetch each instrument's CSV for the range and upsert the closed bars.
+    """Fetch each instrument's EOD bars for the range and upsert the closed ones.
 
     Each symbol is fetched and MERGEd independently so one provider hiccup never
     loses the rest; the per-symbol MERGE keeps the whole run idempotent.
     """
     all_rows: list[dict] = []
     for inst in instruments:
-        text = stooq_common.fetch_csv(inst.stooq_ticker, start_date, end_date)
-        records = stooq_common.parse_csv(text)
+        payload = tiingo_common.fetch_prices(inst.tiingo_ticker, start_date, end_date)
+        records = tiingo_common.parse_prices(payload)
         rows = ohlcv.prepare_rows(inst.symbol, records, SOURCE_ID, fetched_at, today=today)
         if not rows:
-            logger.warning("stooq ETF %s: no closed bars for the requested range", inst.symbol)
+            logger.warning("Tiingo ETF %s: no closed bars for the requested range", inst.symbol)
             continue
         logger.info(
-            "stooq ETF %s: upserting %d bar(s) %s..%s",
+            "Tiingo ETF %s: upserting %d bar(s) %s..%s",
             inst.symbol, len(rows), rows[0]["candle_date"].isoformat(),
             rows[-1]["candle_date"].isoformat(),
         )
@@ -99,12 +104,17 @@ def backfill_history(
     symbol: str | None = None,
     client: bigquery.Client | None = None,
 ) -> int:  # pragma: no cover - live network
-    """Back-fill the full ETF history from stooq into bronze (no date bounds)."""
+    """Back-fill the full ETF history from Tiingo into bronze.
+
+    Passes ``BACKFILL_START_DATE`` as the lower bound: Tiingo returns only the
+    latest bar when ``startDate`` is omitted, so an explicit early start is what
+    pulls the whole history (it clamps to each ticker's first bar).
+    """
     fetched_at = datetime.now(timezone.utc)
     if client is None:
         client = bigquery.Client(project=PROJECT_ID)
-    rows = _ingest_instruments(_instruments(symbol), None, None, fetched_at, client)
-    logger.info("stooq ETF back-fill complete: %d bar(s) written", len(rows))
+    rows = _ingest_instruments(_instruments(symbol), BACKFILL_START_DATE, None, fetched_at, client)
+    logger.info("Tiingo ETF back-fill complete: %d bar(s) written", len(rows))
     return len(rows)
 
 
@@ -114,7 +124,7 @@ def ingest_range(
     symbol: str | None = None,
     client: bigquery.Client | None = None,
 ) -> list[dict]:  # pragma: no cover - live network
-    """Fetch ``[start_date, end_date]`` from stooq and upsert the closed bars."""
+    """Fetch ``[start_date, end_date]`` from Tiingo and upsert the closed bars."""
     if end_date < start_date:
         raise ValueError(
             f"end_date ({end_date.isoformat()}) is before start_date ({start_date.isoformat()})."
@@ -136,14 +146,14 @@ def ingest_latest(
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Ingest daily ETF bars (Strategy 3 universe) from stooq into BigQuery bronze."
+        description="Ingest daily ETF bars (Strategy 3 universe) from Tiingo into BigQuery bronze."
     )
     def iso_date(s):
         return datetime.strptime(s, "%Y-%m-%d").date()
 
     parser.add_argument(
         "--backfill", action="store_true",
-        help="Back-fill the full history from stooq (ignores --start/--end).",
+        help="Back-fill the full history from Tiingo (ignores --start/--end).",
     )
     parser.add_argument(
         "--start", type=iso_date, default=None,

@@ -478,11 +478,11 @@ VALUES (15, 'Google Trends BTC investor attention (weekly)', NULL, TRUE, 'https:
 -- Daily OHLC bars for the eight non-crypto ETFs of the frozen T-19 universe
 -- (SPY/EFA · IEF/TLT · GLD/DBC · UUP/FXY). Unlike the macro/on-chain context
 -- series (single-source, priority NULL), these have TWO competing sources —
--- Yahoo Finance (primary) and stooq (fallback) — that compete by `priority` in
+-- Yahoo Finance (primary) and Tiingo (fallback) — that compete by `priority` in
 -- the silver consolidation (T-21), so a source that starts gapping fails over to
 -- the other. Both tables share the candle shape and the idempotent MERGE on the
 -- natural key (symbol, candle_date); one table per source so bronze stays raw
--- (the Yahoo↔stooq de-dup is the downstream silver transform, NOT baked in here).
+-- (the Yahoo↔Tiingo de-dup is the downstream silver transform, NOT baked in here).
 -- They do NOT feed the OHLCV `conform` consolidation (that is BTC-only). BTC
 -- reuses the existing spot bronze (binance/bitstamp), so it has no ETF table.
 -- Partitioned by MONTH (DATE_TRUNC(candle_date, MONTH)), not day: SPY's history
@@ -508,10 +508,10 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.yahoo_etf_daily_raw` 
 )
 PARTITION BY DATE_TRUNC(candle_date, MONTH)
 CLUSTER BY symbol
-OPTIONS(description = "Raw daily ETF bars from Yahoo Finance (Strategy 3 universe), primary source. Idempotent upsert on (symbol, candle_date); competes with stooq by priority in the silver consolidation. Partitioned by MONTH (10000-partitions-per-table limit).");
+OPTIONS(description = "Raw daily ETF bars from Yahoo Finance (Strategy 3 universe), primary source. Idempotent upsert on (symbol, candle_date); competes with Tiingo by priority in the silver consolidation. Partitioned by MONTH (10000-partitions-per-table limit).");
 
 -- Register Yahoo Finance (ETFs) as a source. Idempotent seed. priority 2:
--- preferred over stooq (1) when both cover the same ETF/date in the silver
+-- preferred over Tiingo (1) when both cover the same ETF/date in the silver
 -- consolidation. (These compete only for the ETF tables, never in `conform`.)
 MERGE `trade-390514.prod_trade_control.source_priority` T
 USING (SELECT 16 AS source_id) S
@@ -519,16 +519,16 @@ ON T.source_id = S.source_id
 WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
 VALUES (16, 'Yahoo Finance ETFs (Strategy 3 universe)', 2, TRUE, 'https://query1.finance.yahoo.com/v8/finance/chart', 'Yahoo Finance', CURRENT_TIMESTAMP());
 
--- ETF bars from stooq (fallback source). Identical shape and upsert as the Yahoo
+-- ETF bars from Tiingo (fallback source). Identical shape and upsert as the Yahoo
 -- table; populated so the consolidation can fail over when Yahoo gaps.
-CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.stooq_etf_daily_raw` (
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.tiingo_etf_daily_raw` (
   symbol          STRING    NOT NULL OPTIONS(description = "Canonical instrument symbol (e.g. SPY), not the provider ticker. Business key and cluster column."),
-  candle_date     DATE      NOT NULL OPTIONS(description = "Trading-day date of the daily bar, from the stooq CSV. Business key and partition column."),
-  price_open      FLOAT64   OPTIONS(description = "Open price."),
-  price_high      FLOAT64   OPTIONS(description = "High price."),
-  price_low       FLOAT64   OPTIONS(description = "Low price."),
-  price_close     FLOAT64   OPTIONS(description = "Close price as delivered by stooq."),
-  volume_traded   FLOAT64   OPTIONS(description = "Traded volume as delivered by stooq."),
+  candle_date     DATE      NOT NULL OPTIONS(description = "Trading-day date of the daily bar, from the Tiingo EOD response. Business key and partition column."),
+  price_open      FLOAT64   OPTIONS(description = "Open price (raw, as delivered by Tiingo)."),
+  price_high      FLOAT64   OPTIONS(description = "High price (raw, as delivered by Tiingo)."),
+  price_low       FLOAT64   OPTIONS(description = "Low price (raw, as delivered by Tiingo)."),
+  price_close     FLOAT64   OPTIONS(description = "Close price (raw, as delivered by Tiingo)."),
+  volume_traded   FLOAT64   OPTIONS(description = "Traded volume as delivered by Tiingo."),
   source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
   datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
   PRIMARY KEY (symbol, candle_date) NOT ENFORCED,
@@ -536,20 +536,19 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.stooq_etf_daily_raw` 
 )
 PARTITION BY DATE_TRUNC(candle_date, MONTH)
 CLUSTER BY symbol
-OPTIONS(description = "Raw daily ETF bars from stooq (Strategy 3 universe), fallback source. Idempotent upsert on (symbol, candle_date); competes with Yahoo by priority in the silver consolidation. Partitioned by MONTH (10000-partitions-per-table limit).");
+OPTIONS(description = "Raw daily ETF bars from Tiingo (Strategy 3 universe), fallback source. Idempotent upsert on (symbol, candle_date); competes with Yahoo by priority in the silver consolidation. Partitioned by MONTH (10000-partitions-per-table limit).");
 
--- Register stooq (ETFs) as a source. Idempotent seed. priority 1: fallback,
--- below Yahoo (2) in the ETF consolidation tie-break. is_active = FALSE: stooq
--- now gates its keyless CSV behind a JavaScript proof-of-work bot challenge
--- (confirmed unreachable from both the dev host and the VM, 2026-06-25), so the
--- fallback table stays empty and Yahoo (16) is the effective source. The
--- dual-source design and the T-21 failover logic are unchanged; re-enable (set
--- is_active = TRUE) if stooq becomes fetchable again.
+-- Register Tiingo (ETFs) as a source. Idempotent seed. priority 1: fallback,
+-- below Yahoo (2) in the ETF consolidation tie-break. is_active = TRUE: Tiingo is
+-- a token-authenticated API (free TIINGO_API_KEY), so it is reachable from the
+-- dev host, the VM and CI — it replaced stooq (whose keyless CSV a JavaScript
+-- proof-of-work bot challenge made unreachable from cloud IPs, 2026-06-25). The
+-- dual-source design and the T-21 failover logic are unchanged.
 MERGE `trade-390514.prod_trade_control.source_priority` T
 USING (SELECT 17 AS source_id) S
 ON T.source_id = S.source_id
 WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
-VALUES (17, 'stooq ETFs (Strategy 3 universe)', 1, FALSE, 'https://stooq.com/q/d/l/', 'stooq', CURRENT_TIMESTAMP());
+VALUES (17, 'Tiingo ETFs (Strategy 3 universe)', 1, TRUE, 'https://api.tiingo.com/tiingo/daily', 'Tiingo', CURRENT_TIMESTAMP());
 
 
 -- ---------------------------------------------------------------------

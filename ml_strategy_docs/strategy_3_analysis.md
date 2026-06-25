@@ -61,7 +61,7 @@ For the project's real purpose, the test *is* the product.
 ## Data sources per class
 
 **Decision (v1): ETFs for every non-crypto class — Yahoo Finance as the primary
-source, stooq as a competing fallback. Crypto reuses the existing spot ingest
+source, Tiingo as a competing fallback. Crypto reuses the existing spot ingest
 (Binance/Bitstamp). Futures are deferred.**
 
 Futures are more cost-accurate but carry roll/contango and the point-in-time
@@ -70,32 +70,34 @@ dividend/total-return inclusive — enough to exercise the multi-asset pipeline.
 
 | Asset class | Instrument (v1) | Source (primary / fallback) | Avoids roll? | Trade-off / rationale |
 |---|---|---|---|---|
-| Equity indices | Total-return ETF (e.g. SPY / EFA / EEM) | Yahoo / stooq | Yes | Liquid, dividend-inclusive proxy; futures add roll + active-contract tracking for no v1 gain. |
-| Gov. bonds | Treasury ETF (e.g. SHY / IEF / TLT) | Yahoo / stooq | Yes | Continuous total return without managing the roll calendar / cheapest-to-deliver. |
-| Commodities | Physical (GLD) / broad ETF (e.g. DBC) | Yahoo / stooq | Partially | "No-roll" holds only for physically-backed ETFs; broad commodity ETFs are futures wrappers — roll/contango is **embedded in NAV**, not eliminated (a cost v1 does not isolate). |
-| FX | Currency ETF (e.g. UUP / FXE / FXY) | Yahoo / stooq | N/A | Thinner, embeds money-market carry + expense ratio vs spot/forwards; acceptable as a v1 directional proxy. |
+| Equity indices | Total-return ETF (e.g. SPY / EFA / EEM) | Yahoo / Tiingo | Yes | Liquid, dividend-inclusive proxy; futures add roll + active-contract tracking for no v1 gain. |
+| Gov. bonds | Treasury ETF (e.g. SHY / IEF / TLT) | Yahoo / Tiingo | Yes | Continuous total return without managing the roll calendar / cheapest-to-deliver. |
+| Commodities | Physical (GLD) / broad ETF (e.g. DBC) | Yahoo / Tiingo | Partially | "No-roll" holds only for physically-backed ETFs; broad commodity ETFs are futures wrappers — roll/contango is **embedded in NAV**, not eliminated (a cost v1 does not isolate). |
+| FX | Currency ETF (e.g. UUP / FXE / FXY) | Yahoo / Tiingo | N/A | Thinner, embeds money-market carry + expense ratio vs spot/forwards; acceptable as a v1 directional proxy. |
 | Crypto (sleeve) | Spot BTC (Binance / Bitstamp) | existing ingest | Yes | Native spot, no roll; reuses the live pipeline, no new source. |
 
 - **Honest caveat on "avoids roll".** Real only for equity/bond/physical-gold ETFs. A
   broad commodity ETF (DBC) wraps futures, so roll/contango is **embedded in the NAV**,
   not eliminated — v1 does not isolate that cost.
 - **`source_priority` = failover, not `NULL`.** For each non-crypto instrument the two
-  sources (Yahoo primary, stooq fallback) **compete by `priority`** in the silver
+  sources (Yahoo primary, Tiingo fallback) **compete by `priority`** in the silver
   consolidation, so a source that starts failing / leaving gaps fails over to the other.
   `priority NULL` is reserved for single-source context series only.
 - **Per-instrument registration landed in T-20** (the bronze ingest ticket), alongside
-  the bronze tables: Yahoo (`source_id` 16, priority 2) and stooq (17, priority 1) are
+  the bronze tables: Yahoo (`source_id` 16, priority 2) and Tiingo (17, priority 1) are
   seeded in `sql/DDL.sql`, competing in the silver consolidation — no orphan
   `source_priority` rows before the tables existed and the universe was frozen (T-19).
-- **stooq fallback currently inactive (2026-06-25).** stooq now gates its keyless CSV
-  behind a JavaScript proof-of-work bot challenge (confirmed unreachable from both the
-  dev host and the VM — not an IP block), so source 17 is seeded `is_active = FALSE`,
-  the fallback table is empty, and Yahoo (16) is the **effective** source. The
-  dual-source design and the T-21 failover logic stay in place — re-enable stooq (or
-  swap in another keyless fallback) if it becomes fetchable again. The Yahoo back-fill
-  populated all eight ETFs (1993→2026), so v1 coverage is unaffected.
-- **API keys.** Yahoo / stooq need none. A class that migrated to a keyed provider would
-  route the key via an environment variable — never committed.
+- **Tiingo fallback is active (token API).** Tiingo is seeded `is_active = TRUE`: a
+  token-authenticated API (free `TIINGO_API_KEY`) reachable from the dev host, the VM and
+  CI, so the failover is real. It **replaced stooq** (2026-06-25), whose keyless CSV a
+  JavaScript proof-of-work bot challenge made unreachable from cloud IPs (the dev host
+  *and* the VM — a provider-level anti-bot wall, not an IP block). Lesson: a keyless
+  scraper is fragile from cloud IPs; a token API is the robust fallback. The Yahoo
+  back-fill already populated all eight ETFs (1993→2026); the Tiingo back-fill runs once
+  the token is set.
+- **API keys.** Yahoo needs none. Tiingo needs a **free** token in `TIINGO_API_KEY` (env
+  var, never committed) — the one keyed dependency, accepted because a token API stays
+  reachable from cloud IPs where keyless scrapers get bot-walled.
 
 ---
 
@@ -103,8 +105,8 @@ dividend/total-return inclusive — enough to exercise the multi-asset pipeline.
 
 > Status: **frozen (T-19).** Nine instruments across five classes, frozen here
 > **before** any signal is computed; sources per class are fixed in the section above.
-> Coverage was confirmed once by a throwaway probe (keyless Yahoo chart API, stooq
-> fallback); the reproducible gate lands as an integration test with T-20.
+> Coverage was confirmed once by a throwaway probe (keyless Yahoo chart API); the
+> reproducible gate lands as an integration test with T-20.
 
 ### Frozen universe (9 instruments)
 
@@ -148,7 +150,7 @@ documented for the portfolio.
 
 ### Coverage — probe result
 
-One-time probe (Yahoo primary, stooq fallback) over the full history. Coverage % is rows
+One-time probe (Yahoo) over the full history. Coverage % is rows
 ÷ NYSE weekday count; ~96% reflects the ~9 holidays/yr netted out, not gaps (max gap ≤ 5
 business days = holiday weeks). Every Tier-A instrument passes; nothing was dropped.
 

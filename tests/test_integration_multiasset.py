@@ -29,7 +29,7 @@ from orchestration.ingest.strategy_3_universe import ETF_UNIVERSE
 
 PROJECT = "trade-390514"
 YAHOO_ETF = f"{PROJECT}.prod_trade_bronze.yahoo_etf_daily_raw"
-STOOQ_ETF = f"{PROJECT}.prod_trade_bronze.stooq_etf_daily_raw"
+TIINGO_ETF = f"{PROJECT}.prod_trade_bronze.tiingo_etf_daily_raw"
 
 # Tier-A coverage-gate frontier (T-19): every core ETF must start on or before
 # this date so ≥ ~13 yrs precede the post-2020 holdout.
@@ -119,8 +119,8 @@ class TestEtfCoverageGate:
 
 
 class TestEtfIdempotency:
-    @pytest.mark.parametrize("table", [YAHOO_ETF, STOOQ_ETF],
-                             ids=["yahoo_etf", "stooq_etf"])
+    @pytest.mark.parametrize("table", [YAHOO_ETF, TIINGO_ETF],
+                             ids=["yahoo_etf", "tiingo_etf"])
     def test_no_duplicate_natural_keys(self, bq, table):
         try:
             duplicates = list(bq.query(f"""
