@@ -36,20 +36,21 @@ from diagrams.saas.chat import Telegram  # noqa: E402
 # Brand-ish styling for a clean, Google-docs-like look.
 GRAPH_ATTR = {
     "fontname": "Helvetica-Bold",
-    "fontsize": "30",
+    "fontsize": "40",
     "labelloc": "t",
     "bgcolor": "white",
-    "pad": "0.8",
-    "nodesep": "1.0",
-    "ranksep": "1.6",
+    "pad": "0.5",
+    "nodesep": "0.6",
+    "ranksep": "1.1",
     "splines": "spline",
     "compound": "true",
 }
-# Cluster (sub-graph) label styling — larger so it stays legible when the PNG
-# is scaled down inside the README.
-CLUSTER_ATTR = {"fontname": "Helvetica-Bold", "fontsize": "18"}
-NODE_ATTR = {"fontname": "Helvetica", "fontsize": "16"}
-EDGE_ATTR = {"fontname": "Helvetica", "fontsize": "15", "color": "#5f6368"}
+# GitHub renders the PNG scaled to the README column width, so legibility comes
+# from a COMPACT canvas (tight nodesep/ranksep → less down-scaling) plus large
+# fonts and SHORT, wrapped labels that don't collide with neighbours.
+CLUSTER_ATTR = {"fontname": "Helvetica-Bold", "fontsize": "24"}
+NODE_ATTR = {"fontname": "Helvetica", "fontsize": "22"}
+EDGE_ATTR = {"fontname": "Helvetica", "fontsize": "18", "color": "#5f6368"}
 
 # Edge styles: solid blue = data flow, dashed grey = provisioning (IaC).
 DATA = Edge(color="#4285F4")
@@ -67,10 +68,10 @@ with Diagram(
     node_attr=NODE_ATTR,
     edge_attr=EDGE_ATTR,
 ):
-    sources = Internet("Market-data APIs\n(Binance · Bitstamp · FRED ·\nCoin Metrics · Yahoo / Tiingo)")
+    sources = Internet("Market-data APIs\n(Binance · Bitstamp · FRED ·\nCoin Metrics · Yahoo/Tiingo)")
 
     with Cluster("e2-micro VM — Compute Engine (Airflow)", graph_attr=CLUSTER_ATTR):
-        scheduler = Airflow("Scheduler\n@daily DAG")
+        scheduler = Airflow("Airflow\nscheduler")
         ingest = Python("Ingest\nPythonOperator")
         scheduler >> Edge(color="#5f6368", constraint="false") >> ingest
 
@@ -81,7 +82,7 @@ with Diagram(
 
     # Alert is also a PythonOperator on the VM, but kept outside the VM cluster
     # so the cluster box does not span ranks (it sits late in the flow).
-    alert = Python("Alert · PythonOperator\n(on the VM)")
+    alert = Python("Alert\nPythonOperator (VM)")
     telegram = Telegram("Telegram\nalert on change")
     # Gold training/monitor views consumed by a Looker Studio dashboard.
     looker = Looker("Looker Studio\nQA dashboard")
