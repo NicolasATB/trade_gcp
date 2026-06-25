@@ -57,8 +57,8 @@ GRAPH_ATTR = {
     "labelloc": "t",
     "bgcolor": "white",
     "pad": "1.2",
-    "nodesep": "1.1",
-    "ranksep": "1.7",
+    "nodesep": "1.2",
+    "ranksep": "2.1",
     "splines": "spline",
     "compound": "true",
 }
@@ -67,7 +67,7 @@ GRAPH_ATTR = {
 # fonts and SHORT, wrapped labels that don't collide with neighbours.
 CLUSTER_ATTR = {"fontname": "Helvetica-Bold", "fontsize": "24"}
 NODE_ATTR = {"fontname": "Helvetica", "fontsize": "22"}
-EDGE_ATTR = {"fontname": "Helvetica", "fontsize": "18", "color": "#5f6368"}
+EDGE_ATTR = {"fontname": "Helvetica-Bold", "fontsize": "24", "color": "#5f6368"}
 
 # Edge styles: solid blue = data flow, dashed grey = provisioning (IaC).
 DATA = Edge(color="#4285F4")
@@ -98,7 +98,10 @@ with Diagram(
             scheduler = Airflow("Airflow\nscheduler")
             # Alert is also a PythonOperator orchestrated by Airflow on the VM.
             alert = Python("Alert\nPythonOperator")
-        df = Dataflow("Dataflow\n(Apache Beam)")
+        # Dataflow runs on managed GCP workers; Airflow only launches it. Its own
+        # box makes the orchestration boundary explicit.
+        with Cluster("Managed Dataflow (Apache Beam)", graph_attr=CLUSTER_ATTR):
+            df = Dataflow("Dataflow\njob")
 
     # ---- LAYER 3: data & platform ----------------------------------------
     with Cluster("Data & platform", graph_attr=CLUSTER_ATTR):
@@ -110,7 +113,8 @@ with Diagram(
         iac = Terraform("Terraform\n(BigQuery + VM)")
         repo = Github("GitHub")
         ci = GithubActions("CI\nruff + pytest")
-        repo >> Edge(color="#5f6368", constraint="false") >> ci   # push triggers CI
+        iac >> Edge(style="invis", constraint="false") >> repo   # order: Terraform leftmost
+        repo >> Edge(color="#5f6368", constraint="false") >> ci  # push triggers CI
 
     # --- Constraining edges (downward) lock the four layers top→bottom ---
     sources >> Edge(color="#4285F4", label="download") >> ingest
@@ -118,12 +122,13 @@ with Diagram(
     bq >> Edge(style="invis") >> iac   # layout only: anchor the IaC layer at the bottom
 
     # --- Cross-layer data flow (constraint=false so it doesn't move ranks) ---
-    scheduler >> Edge(color="#4285F4", label="launch", constraint="false") >> df
+    scheduler >> Edge(color="#4285F4", label="launch /\norchestrate", constraint="false") >> df
     df >> Edge(color="#4285F4", label="read OHLCV + params /\nwrite RSI + signal", constraint="false") >> bq
     bq >> Edge(color="#4285F4", constraint="false") >> df
     bq >> Edge(color="#4285F4", label="last signal", constraint="false") >> alert
     alert >> Edge(color="#34A853", label="send only if changed", constraint="false") >> telegram
-    bq >> Edge(color="#A142F4", label="gold training +\nmonitor views", constraint="false") >> looker
+    bq >> Edge(color="#A142F4", label="gold training +\nmonitor views",
+               constraint="false", tailport="e", headport="s") >> looker
 
     # GCS temp_location is the staging intermediary for BigQuery I/O: reads
     # export to GCS, writes stage temp files there for the FILE_LOADS load job.
@@ -131,6 +136,6 @@ with Diagram(
     gcs >> Edge(color="#9aa0a6", style="dashed", dir="both",
                 label="FILE_LOADS /\nexport staging", constraint="false") >> bq
 
-    # --- Provisioning (dashed, upward from the IaC layer) ---
-    iac >> Edge(color="#9aa0a6", style="dashed", constraint="false") >> bq
-    iac >> Edge(color="#9aa0a6", style="dashed", constraint="false") >> scheduler
+    # --- Provisioning (dashed) — enter the targets from the LEFT (headport=w) ---
+    iac >> Edge(color="#9aa0a6", style="dashed", constraint="false", headport="w") >> bq
+    iac >> Edge(color="#9aa0a6", style="dashed", constraint="false", headport="w") >> scheduler
