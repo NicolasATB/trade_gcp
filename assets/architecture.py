@@ -22,7 +22,7 @@ for _candidate in (r"C:\Program Files\Graphviz\bin", r"C:\Program Files (x86)\Gr
         os.environ["PATH"] = _candidate + os.pathsep + os.environ.get("PATH", "")
 
 from diagrams import Cluster, Diagram, Edge  # noqa: E402
-from diagrams.gcp.analytics import Bigquery, Dataflow  # noqa: E402
+from diagrams.gcp.analytics import Bigquery, Dataflow, Looker  # noqa: E402
 from diagrams.gcp.compute import ComputeEngine  # noqa: E402
 from diagrams.gcp.storage import GCS  # noqa: E402
 from diagrams.onprem.ci import GithubActions  # noqa: E402
@@ -35,18 +35,21 @@ from diagrams.saas.chat import Telegram  # noqa: E402
 
 # Brand-ish styling for a clean, Google-docs-like look.
 GRAPH_ATTR = {
-    "fontname": "Helvetica",
-    "fontsize": "22",
+    "fontname": "Helvetica-Bold",
+    "fontsize": "30",
     "labelloc": "t",
     "bgcolor": "white",
     "pad": "0.8",
-    "nodesep": "0.9",
-    "ranksep": "1.5",
+    "nodesep": "1.0",
+    "ranksep": "1.6",
     "splines": "spline",
     "compound": "true",
 }
-NODE_ATTR = {"fontname": "Helvetica", "fontsize": "12"}
-EDGE_ATTR = {"fontname": "Helvetica", "fontsize": "10", "color": "#5f6368"}
+# Cluster (sub-graph) label styling — larger so it stays legible when the PNG
+# is scaled down inside the README.
+CLUSTER_ATTR = {"fontname": "Helvetica-Bold", "fontsize": "18"}
+NODE_ATTR = {"fontname": "Helvetica", "fontsize": "16"}
+EDGE_ATTR = {"fontname": "Helvetica", "fontsize": "15", "color": "#5f6368"}
 
 # Edge styles: solid blue = data flow, dashed grey = provisioning (IaC).
 DATA = Edge(color="#4285F4")
@@ -66,12 +69,12 @@ with Diagram(
 ):
     sources = Internet("Market-data APIs\n(Binance · Bitstamp · FRED ·\nCoin Metrics · Yahoo / Tiingo)")
 
-    with Cluster("e2-micro VM — Compute Engine (Airflow)"):
+    with Cluster("e2-micro VM — Compute Engine (Airflow)", graph_attr=CLUSTER_ATTR):
         scheduler = Airflow("Scheduler\n@daily DAG")
         ingest = Python("Ingest\nPythonOperator")
         scheduler >> Edge(color="#5f6368", constraint="false") >> ingest
 
-    with Cluster("Managed GCP services"):
+    with Cluster("Managed GCP services", graph_attr=CLUSTER_ATTR):
         bq = Bigquery("BigQuery\nmedallion\nbronze → silver → gold")
         df = Dataflow("Dataflow\n(Apache Beam)")
         gcs = GCS("Cloud Storage\ntemp_location")
@@ -80,8 +83,10 @@ with Diagram(
     # so the cluster box does not span ranks (it sits late in the flow).
     alert = Python("Alert · PythonOperator\n(on the VM)")
     telegram = Telegram("Telegram\nalert on change")
+    # Gold training/monitor views consumed by a Looker Studio dashboard.
+    looker = Looker("Looker Studio\nQA dashboard")
 
-    with Cluster("Source · IaC · CI"):
+    with Cluster("Source · IaC · CI", graph_attr=CLUSTER_ATTR):
         repo = Github("GitHub")
         ci = GithubActions("CI\nruff + pytest")
         iac = Terraform("Terraform\n(IaC)")
@@ -94,10 +99,15 @@ with Diagram(
     scheduler >> Edge(color="#4285F4", label="launch") >> df
     bq >> Edge(color="#4285F4", label="last signal") >> alert
     alert >> Edge(color="#34A853", label="send only if changed") >> telegram
+    bq >> Edge(color="#A142F4", label="gold training +\nmonitor views") >> looker
 
     # --- Same-rank / return / provisioning edges: constraint="false" ---
     df >> Edge(color="#4285F4", label="read OHLCV + params /\nwrite RSI + signal", constraint="false") >> bq
     bq >> Edge(color="#4285F4", constraint="false") >> df
-    df >> Edge(color="#9aa0a6", style="dashed", label="temp", constraint="false") >> gcs
+    # GCS temp_location is the staging intermediary for BigQuery I/O: reads
+    # export to GCS, writes stage temp files there for the FILE_LOADS load job.
+    df >> Edge(color="#9aa0a6", style="dashed", label="temp files", constraint="false") >> gcs
+    gcs >> Edge(color="#9aa0a6", style="dashed", dir="both",
+                label="FILE_LOADS /\nexport staging", constraint="false") >> bq
     iac >> Edge(color="#9aa0a6", style="dashed", constraint="false") >> bq
     iac >> Edge(color="#9aa0a6", style="dashed", constraint="false") >> scheduler
