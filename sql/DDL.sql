@@ -474,6 +474,80 @@ VALUES (15, 'Google Trends BTC investor attention (weekly)', NULL, TRUE, 'https:
 
 
 -- ---------------------------------------------------------------------
+-- Multi-asset ETF sources (Strategy 3 · cross-asset TSMOM, T-20)
+-- Daily OHLC bars for the eight non-crypto ETFs of the frozen T-19 universe
+-- (SPY/EFA · IEF/TLT · GLD/DBC · UUP/FXY). Unlike the macro/on-chain context
+-- series (single-source, priority NULL), these have TWO competing sources —
+-- Yahoo Finance (primary) and stooq (fallback) — that compete by `priority` in
+-- the silver consolidation (T-21), so a source that starts gapping fails over to
+-- the other. Both tables share the candle shape and the idempotent MERGE on the
+-- natural key (symbol, candle_date); one table per source so bronze stays raw
+-- (the Yahoo↔stooq de-dup is the downstream silver transform, NOT baked in here).
+-- They do NOT feed the OHLCV `conform` consolidation (that is BTC-only). BTC
+-- reuses the existing spot bronze (binance/bitstamp), so it has no ETF table.
+-- Partitioned by MONTH (DATE_TRUNC(candle_date, MONTH)), not day: SPY's history
+-- since 1993 across several symbols would approach the 10000-partitions-per-table
+-- limit at daily granularity. Clustered by symbol (the column reads filter on).
+-- ---------------------------------------------------------------------
+
+-- ETF bars from Yahoo Finance (primary source). One row per (symbol, candle_date),
+-- as delivered by the public chart API. Full history back-filled once, then the
+-- daily job refreshes a recent window; idempotent upsert on (symbol, candle_date).
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.yahoo_etf_daily_raw` (
+  symbol          STRING    NOT NULL OPTIONS(description = "Canonical instrument symbol (e.g. SPY), not the provider ticker. Business key and cluster column."),
+  candle_date     DATE      NOT NULL OPTIONS(description = "Trading-day date (UTC) of the daily bar, from the Yahoo chart timestamp. Business key and partition column."),
+  price_open      FLOAT64   OPTIONS(description = "Open price."),
+  price_high      FLOAT64   OPTIONS(description = "High price."),
+  price_low       FLOAT64   OPTIONS(description = "Low price."),
+  price_close     FLOAT64   OPTIONS(description = "Close price (split/dividend-adjusted as delivered by Yahoo)."),
+  volume_traded   FLOAT64   OPTIONS(description = "Traded volume as delivered by Yahoo."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (symbol, candle_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY DATE_TRUNC(candle_date, MONTH)
+CLUSTER BY symbol
+OPTIONS(description = "Raw daily ETF bars from Yahoo Finance (Strategy 3 universe), primary source. Idempotent upsert on (symbol, candle_date); competes with stooq by priority in the silver consolidation. Partitioned by MONTH (10000-partitions-per-table limit).");
+
+-- Register Yahoo Finance (ETFs) as a source. Idempotent seed. priority 2:
+-- preferred over stooq (1) when both cover the same ETF/date in the silver
+-- consolidation. (These compete only for the ETF tables, never in `conform`.)
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 16 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (16, 'Yahoo Finance ETFs (Strategy 3 universe)', 2, TRUE, 'https://query1.finance.yahoo.com/v8/finance/chart', 'Yahoo Finance', CURRENT_TIMESTAMP());
+
+-- ETF bars from stooq (fallback source). Identical shape and upsert as the Yahoo
+-- table; populated so the consolidation can fail over when Yahoo gaps.
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.stooq_etf_daily_raw` (
+  symbol          STRING    NOT NULL OPTIONS(description = "Canonical instrument symbol (e.g. SPY), not the provider ticker. Business key and cluster column."),
+  candle_date     DATE      NOT NULL OPTIONS(description = "Trading-day date of the daily bar, from the stooq CSV. Business key and partition column."),
+  price_open      FLOAT64   OPTIONS(description = "Open price."),
+  price_high      FLOAT64   OPTIONS(description = "High price."),
+  price_low       FLOAT64   OPTIONS(description = "Low price."),
+  price_close     FLOAT64   OPTIONS(description = "Close price as delivered by stooq."),
+  volume_traded   FLOAT64   OPTIONS(description = "Traded volume as delivered by stooq."),
+  source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
+  datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
+  PRIMARY KEY (symbol, candle_date) NOT ENFORCED,
+  FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
+)
+PARTITION BY DATE_TRUNC(candle_date, MONTH)
+CLUSTER BY symbol
+OPTIONS(description = "Raw daily ETF bars from stooq (Strategy 3 universe), fallback source. Idempotent upsert on (symbol, candle_date); competes with Yahoo by priority in the silver consolidation. Partitioned by MONTH (10000-partitions-per-table limit).");
+
+-- Register stooq (ETFs) as a source. Idempotent seed. priority 1: fallback,
+-- below Yahoo (2) in the ETF consolidation tie-break.
+MERGE `trade-390514.prod_trade_control.source_priority` T
+USING (SELECT 17 AS source_id) S
+ON T.source_id = S.source_id
+WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
+VALUES (17, 'stooq ETFs (Strategy 3 universe)', 1, TRUE, 'https://stooq.com/q/d/l/', 'stooq', CURRENT_TIMESTAMP());
+
+
+-- ---------------------------------------------------------------------
 -- prod_trade_silver (Option B: symbol and temporality as columns)
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_silver.ohlcv_validated` (

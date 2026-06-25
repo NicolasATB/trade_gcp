@@ -40,21 +40,15 @@ Run standalone:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
-import urllib.parse
-import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
 from google.cloud import bigquery
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_random_exponential,
-)
+
+from orchestration.ingest.yahoo_common import epoch as _epoch
+from orchestration.ingest.yahoo_common import fetch_chart as _fetch_chart
+from orchestration.ingest.yahoo_common import parse_chart
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +59,6 @@ BQ_TABLE = os.environ.get("BQ_DXY_TABLE", "yahoo_dxy_daily_raw")
 SYMBOL = os.environ.get("YAHOO_SYMBOL", "DX-Y.NYB")
 SOURCE_ID = int(os.environ.get("YAHOO_SOURCE_ID", "6"))
 
-API_BASE = os.environ.get("YAHOO_API_BASE", "https://query1.finance.yahoo.com/v8/finance/chart")
-# Yahoo rejects default urllib UAs; a browser-like UA is required.
-USER_AGENT = os.environ.get(
-    "YAHOO_USER_AGENT",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-)
-HTTP_TIMEOUT = int(os.environ.get("YAHOO_HTTP_TIMEOUT", "30"))
 DAILY_LOOKBACK_DAYS = int(os.environ.get("YAHOO_DAILY_LOOKBACK_DAYS", "10"))
 
 # A single MERGE (DML) may modify at most 4000 partitions; the table partitions
@@ -84,52 +70,9 @@ def _table_fqn() -> str:
     return f"{PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
 
 
-# --- Parsing / row building (pure, unit-tested) ------------------------------
-
-def parse_chart(payload: dict) -> list[dict]:
-    """Parse a Yahoo chart JSON payload into raw OHLC records.
-
-    Returns one ``{"date", "open", "high", "low", "close", "volume"}`` per daily
-    bar, ascending by date. The bar date is the UTC date of the Yahoo timestamp
-    (a NY index opens in the afternoon UTC, so the calendar date is unambiguous).
-    Bars with a null close (holidays inside the range) are skipped. Raises
-    ``ValueError`` if Yahoo reports an error.
-    """
-    chart = payload.get("chart") or {}
-    if chart.get("error"):
-        raise ValueError(f"Yahoo chart error: {chart['error']}")
-    results = chart.get("result") or []
-    if not results:
-        return []
-    result = results[0]
-    timestamps = result.get("timestamp") or []
-    quote_blocks = (result.get("indicators") or {}).get("quote") or [{}]
-    quote = quote_blocks[0] or {}
-    opens = quote.get("open") or []
-    highs = quote.get("high") or []
-    lows = quote.get("low") or []
-    closes = quote.get("close") or []
-    volumes = quote.get("volume") or []
-
-    records: list[dict] = []
-    for i, ts in enumerate(timestamps):
-        close = closes[i] if i < len(closes) else None
-        if close is None:  # incomplete/holiday bar — skip
-            continue
-        bar_date = datetime.fromtimestamp(ts, tz=timezone.utc).date()
-        records.append(
-            {
-                "date": bar_date,
-                "open": opens[i] if i < len(opens) else None,
-                "high": highs[i] if i < len(highs) else None,
-                "low": lows[i] if i < len(lows) else None,
-                "close": close,
-                "volume": volumes[i] if i < len(volumes) else None,
-            }
-        )
-    records.sort(key=lambda r: r["date"])
-    return records
-
+# --- Row building (pure, unit-tested) ----------------------------------------
+# Chart fetch/parse (``parse_chart``) is shared via ``yahoo_common``; this module
+# keeps the DXY-specific row mapping and the MERGE on the natural key ``dxy_date``.
 
 def _build_row(record: dict, fetched_at: datetime | None = None) -> dict:
     """Map one OHLC record to a bronze table row (pure mapping)."""
@@ -237,40 +180,13 @@ def _upsert_rows(client: bigquery.Client, rows: list[dict], chunk_size: int | No
         _upsert_chunk(client, chunk)
 
 
-# --- HTTP fetch (live I/O) ----------------------------------------------------
-
-@retry(
-    retry=retry_if_exception_type(urllib.error.URLError),
-    stop=stop_after_attempt(5),
-    wait=wait_random_exponential(multiplier=1, max=30),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
-def _http_get(url: str) -> str:  # pragma: no cover - live network
-    """GET ``url`` with a browser UA; retried on transient URLErrors."""
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        return resp.read().decode("utf-8")
-
-
-def fetch_chart(period1: int, period2: int) -> dict:  # pragma: no cover - live network
-    """Fetch the daily chart for ``[period1, period2]`` (epoch seconds) as JSON."""
-    params = {"period1": period1, "period2": period2, "interval": "1d", "events": "history"}
-    url = f"{API_BASE}/{urllib.parse.quote(SYMBOL)}?{urllib.parse.urlencode(params)}"
-    return json.loads(_http_get(url))
-
-
-def _epoch(d: date) -> int:
-    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
-
-
 # --- Public entry points ------------------------------------------------------
 
 def backfill_history(client: bigquery.Client | None = None) -> int:  # pragma: no cover - live network
     """Back-fill the full DXY history from Yahoo into bronze (period1=0 to now)."""
     fetched_at = datetime.now(timezone.utc)
     now = int(fetched_at.timestamp())
-    payload = fetch_chart(0, now)
+    payload = _fetch_chart(SYMBOL, 0, now)
     rows = _prepare_rows(parse_chart(payload), fetched_at)
     if not rows:
         logger.warning("DXY back-fill: no closed bars parsed from Yahoo")
@@ -299,7 +215,7 @@ def ingest_range(
         )
     fetched_at = datetime.now(timezone.utc)
     # +1 day on period2 so the end date is included (period2 is exclusive-ish).
-    payload = fetch_chart(_epoch(start_date), _epoch(end_date + timedelta(days=1)))
+    payload = _fetch_chart(SYMBOL, _epoch(start_date), _epoch(end_date + timedelta(days=1)))
     rows = _prepare_rows(parse_chart(payload), fetched_at)
     if not rows:
         logger.warning("DXY range: no closed bars for %s..%s", start_date, end_date)
