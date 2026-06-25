@@ -87,6 +87,13 @@ dividend/total-return inclusive — enough to exercise the multi-asset pipeline.
   the bronze tables: Yahoo (`source_id` 16, priority 2) and stooq (17, priority 1) are
   seeded in `sql/DDL.sql`, competing in the silver consolidation — no orphan
   `source_priority` rows before the tables existed and the universe was frozen (T-19).
+- **stooq fallback currently inactive (2026-06-25).** stooq now gates its keyless CSV
+  behind a JavaScript proof-of-work bot challenge (confirmed unreachable from both the
+  dev host and the VM — not an IP block), so source 17 is seeded `is_active = FALSE`,
+  the fallback table is empty, and Yahoo (16) is the **effective** source. The
+  dual-source design and the T-21 failover logic stay in place — re-enable stooq (or
+  swap in another keyless fallback) if it becomes fetchable again. The Yahoo back-fill
+  populated all eight ETFs (1993→2026), so v1 coverage is unaffected.
 - **API keys.** Yahoo / stooq need none. A class that migrated to a keyed provider would
   route the key via an environment variable — never committed.
 

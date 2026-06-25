@@ -192,6 +192,9 @@ class TestDdlContract:
         # Yahoo (16) is primary with the higher priority; stooq (17) is fallback.
         assert "SELECT 16 AS source_id" in ddl
         assert "SELECT 17 AS source_id" in ddl
-        # Yahoo seeds priority 2, stooq priority 1 (relative order is what matters).
+        # Yahoo seeds priority 2 (active), stooq priority 1 (relative order is
+        # what matters). stooq is seeded is_active = FALSE: its keyless CSV is
+        # gated behind a JS proof-of-work bot challenge, so the fallback table
+        # stays empty and Yahoo is the effective source.
         assert re.search(r"VALUES \(16,.*?,\s*2,\s*TRUE", ddl)
-        assert re.search(r"VALUES \(17,.*?,\s*1,\s*TRUE", ddl)
+        assert re.search(r"VALUES \(17,.*?,\s*1,\s*FALSE", ddl)

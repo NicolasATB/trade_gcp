@@ -539,12 +539,17 @@ CLUSTER BY symbol
 OPTIONS(description = "Raw daily ETF bars from stooq (Strategy 3 universe), fallback source. Idempotent upsert on (symbol, candle_date); competes with Yahoo by priority in the silver consolidation. Partitioned by MONTH (10000-partitions-per-table limit).");
 
 -- Register stooq (ETFs) as a source. Idempotent seed. priority 1: fallback,
--- below Yahoo (2) in the ETF consolidation tie-break.
+-- below Yahoo (2) in the ETF consolidation tie-break. is_active = FALSE: stooq
+-- now gates its keyless CSV behind a JavaScript proof-of-work bot challenge
+-- (confirmed unreachable from both the dev host and the VM, 2026-06-25), so the
+-- fallback table stays empty and Yahoo (16) is the effective source. The
+-- dual-source design and the T-21 failover logic are unchanged; re-enable (set
+-- is_active = TRUE) if stooq becomes fetchable again.
 MERGE `trade-390514.prod_trade_control.source_priority` T
 USING (SELECT 17 AS source_id) S
 ON T.source_id = S.source_id
 WHEN NOT MATCHED THEN INSERT (source_id, label, priority, is_active, url_source, name_source, datetime_update)
-VALUES (17, 'stooq ETFs (Strategy 3 universe)', 1, TRUE, 'https://stooq.com/q/d/l/', 'stooq', CURRENT_TIMESTAMP());
+VALUES (17, 'stooq ETFs (Strategy 3 universe)', 1, FALSE, 'https://stooq.com/q/d/l/', 'stooq', CURRENT_TIMESTAMP());
 
 
 -- ---------------------------------------------------------------------
