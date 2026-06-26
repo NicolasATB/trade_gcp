@@ -51,6 +51,23 @@ class TestParsePrices:
         bars = [{"date": "2026-06-01T00:00:00.000Z", "open": 99.0, "close": 99.8}]
         assert parse_prices(bars)[0]["volume"] is None
 
+    def test_keeps_split_factor_and_div_cash(self):
+        # The EFA 3:1 ex-date bar: Tiingo carries splitFactor=3.0 — the raw field
+        # the silver step uses to rebuild a split-only close.
+        bars = [{
+            "date": "2005-06-09T00:00:00.000Z", "open": 52.0, "high": 53.0,
+            "low": 51.0, "close": 52.54, "volume": 100, "splitFactor": 3.0, "divCash": 0.21,
+        }]
+        rec = parse_prices(bars)[0]
+        assert rec["split_factor"] == 3.0
+        assert rec["div_cash"] == 0.21
+
+    def test_missing_corporate_actions_are_none(self):
+        # _BARS carry no splitFactor/divCash (the common case) → kept as None.
+        rec = parse_prices(_BARS)[0]
+        assert rec["split_factor"] is None
+        assert rec["div_cash"] is None
+
     def test_empty_array_yields_no_records(self):
         # A valid ticker with no bars in range yields an empty array.
         assert parse_prices([]) == []

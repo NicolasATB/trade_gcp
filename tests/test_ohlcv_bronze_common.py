@@ -61,6 +61,20 @@ class TestBuildRow:
         assert row["price_open"] is None
         assert row["price_close"] == pytest.approx(100.0)
 
+    def test_maps_corporate_actions(self):
+        rec = _record(date(2005, 6, 9))
+        rec["split_factor"] = 3.0
+        rec["div_cash"] = 0.21
+        row = build_row("EFA", rec, source_id=17, fetched_at=FETCHED)
+        assert row["split_factor"] == pytest.approx(3.0)
+        assert row["div_cash"] == pytest.approx(0.21)
+
+    def test_absent_corporate_actions_default_to_none(self):
+        # Yahoo records carry no split/div (its close is already split-adjusted).
+        row = build_row("SPY", _record(date(2026, 6, 1)), source_id=16, fetched_at=FETCHED)
+        assert row["split_factor"] is None
+        assert row["div_cash"] is None
+
 
 # ---------------------------------------------------------------------------
 # _closed_only / prepare_rows — drop the in-progress current-UTC-day bar
@@ -107,6 +121,13 @@ class TestMergeContract:
         merged = _norm(_MERGE_SQL)
         assert "PARTITION BY s.symbol, s.candle_date" in merged
         assert "WHERE rn = 1" in merged
+
+    def test_carries_corporate_action_columns(self):
+        # split_factor / div_cash are upserted (raw provider fields) so the silver
+        # split-only reconstruction has them.
+        merged = _norm(_MERGE_SQL)
+        assert "split_factor = S.split_factor" in merged
+        assert "div_cash = S.div_cash" in merged
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +208,15 @@ class TestDdlContract:
     def test_natural_key_is_symbol_candle_date(self, ddl, table):
         block = ddl.split(table, 1)[1]
         assert "PRIMARY KEY (symbol, candle_date) NOT ENFORCED" in block
+
+    @pytest.mark.parametrize("table", ["yahoo_etf_daily_raw", "tiingo_etf_daily_raw"])
+    def test_declares_corporate_action_columns(self, ddl, table):
+        # Both per-source tables share the loader's schema, so both carry the raw
+        # corporate-action columns (Yahoo's stay NULL; Tiingo's drive the silver
+        # split-only reconstruction).
+        block = ddl.split(table, 1)[1].split("PRIMARY KEY", 1)[0]
+        assert "split_factor" in block
+        assert "div_cash" in block
 
     def test_yahoo_source_16_outranks_tiingo_17(self, ddl):
         # Yahoo (16) is primary with the higher priority; Tiingo (17) is fallback.

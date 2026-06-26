@@ -55,9 +55,11 @@ does not** — Airflow only *launches* it, and the job runs on managed GCP worke
    supply, active addresses, tx count, Google Trends), each reusing its
    `orchestration/ingest/*` module; concurrency capped to fit the e2-micro's RAM.
 3. **Conform — `stages/conform.py`:** consolidates daily candles from every bronze
-   candle table into `ohlcv_validated` (`1d`) + the aggregated weekly candle (`1w`).
-   *Rules:* multi-source ties go to the highest `priority`; weeks run **Monday→Sunday**
-   (`WEEK(MONDAY)`), labelled by the opening Monday.
+   candle table (BTC spot + the eight Strategy-3 ETFs) into `ohlcv_validated` (`1d`) +
+   the aggregated weekly candle (`1w`). *Rules:* multi-source ties on `(symbol, date)`
+   go to the highest `priority`; the Tiingo ETF branch is **split-adjusted to Yahoo's
+   basis** before the tie-break (T-21); weeks run **Monday→Sunday** (`WEEK(MONDAY)`),
+   labelled by the opening Monday.
 4. **RSI — `stages/rsi.py`:** Wilder RSI (recursive state) for `1d`/`1w`; full
    bootstrap first, incremental after. *Rule:* the first `rsi_period` bootstrap rows
    publish `rsi = NULL` (warm-up) and the signals stage skips them.
@@ -84,12 +86,13 @@ seed — lives in `sql/DDL.sql` (PK/FK constraints are `NOT ENFORCED`).
 | `prod_trade_control`     | Control  | Source registry and consolidation priority.                             |
 | `prod_trade_strategy`    | Strategy | Strategy catalog + versioned params (`strategy_rsi_daily_week`, seed `14/40/70/30/70`). |
 | `prod_trade_bronze`      | Bronze   | Raw landing — one table per source, as delivered.                       |
-| `prod_trade_silver`      | Silver   | Conformed OHLCV (`ohlcv_validated`) + RSI features (`rsi_features`).     |
+| `prod_trade_silver`      | Silver   | Conformed multi-asset OHLCV (`ohlcv_validated`) + RSI features (`rsi_features`) + weekly returns/excess/vol view (`vw_asset_returns_weekly`). |
 | `prod_trade_gold`        | Gold     | Signals fact (`fact_signals`) + training/monitoring views.              |
 
-**Bronze.** Two **candle** tables feed `conform` (deduped by date, highest `priority`
-wins): `binance_btcusd_daily_raw` (2017→, priority 3) and `bitstamp_btcusd_daily_raw`
-(pre-Binance 2011→2017-08-16, priority 4). **Non-candle context series** (`priority
+**Bronze.** The **candle** tables feed `conform` (deduped per `(symbol, date)`, highest
+`priority` wins): BTC spot — `binance_btcusd_daily_raw` (2017→, priority 3) and
+`bitstamp_btcusd_daily_raw` (pre-Binance 2011→2017-08-16, priority 4) — plus the ETF
+tables below. **Non-candle context series** (`priority
 NULL`, never feed `conform`; own table; long daily series partition **monthly** for the
 10000-partitions/table cap; each has a full-history `--backfill` + daily update and
 **never fabricates a value** — gaps are alerted and skipped): **MVRV** (id 5), **DXY**
@@ -100,11 +103,15 @@ per-window 0-100, the **stitched** series being the silver view
 `vw_google_trends_btc_weekly`). For **Strategy 3**, eight ETFs
 (SPY/EFA·IEF/TLT·GLD/DBC·UUP/FXY) land via **two sources competing by `priority`** —
 Yahoo (16, primary, keyless) + Tiingo (17, fallback, token) — into `yahoo_etf_daily_raw` /
-`tiingo_etf_daily_raw` (keyed `(symbol, candle_date)`); BTC reuses spot. `coinapi_*` / `investing_*` DDL ready, ingestion pending.
+`tiingo_etf_daily_raw` (keyed `(symbol, candle_date)`, with raw `split_factor`/`div_cash`);
+`conform` reconciles Tiingo's raw close to Yahoo's split-adjusted basis in silver (T-21).
+BTC reuses spot. `coinapi_*` / `investing_*` DDL ready, ingestion pending.
 
-**Silver.** `ohlcv_validated` = typed, de-duplicated OHLCV (`1d` + `1w`).
-`rsi_features` = Wilder RSI with recursive state for `1d`/`1w` (idempotent incremental
-updates, reusable across strategies).
+**Silver.** `ohlcv_validated` = typed, de-duplicated **multi-asset** OHLCV (`1d` + `1w`),
+split-adjusted price-return (not total-return). `rsi_features` = Wilder RSI with recursive
+state for `1d`/`1w` (idempotent incremental updates, reusable across strategies).
+`vw_asset_returns_weekly` = the Strategy-3 TSMOM feature layer: per-symbol weekly returns,
+excess returns vs the FRED DFF risk-free (point-in-time) and realized vol (×√52).
 
 **Gold.** `fact_signals` is the star-schema fact (one row per
 `symbol/temporality/signal_start/strategy_id`). Two **training views** line up close +

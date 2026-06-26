@@ -499,8 +499,10 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.yahoo_etf_daily_raw` 
   price_open      FLOAT64   OPTIONS(description = "Open price."),
   price_high      FLOAT64   OPTIONS(description = "High price."),
   price_low       FLOAT64   OPTIONS(description = "Low price."),
-  price_close     FLOAT64   OPTIONS(description = "Close price (split/dividend-adjusted as delivered by Yahoo)."),
+  price_close     FLOAT64   OPTIONS(description = "Close price as delivered by Yahoo (indicators.quote[0].close): split-adjusted but NOT dividend-adjusted. The silver consolidation reconciles Tiingo's raw close to this split-only basis (T-21)."),
   volume_traded   FLOAT64   OPTIONS(description = "Traded volume as delivered by Yahoo."),
+  split_factor    FLOAT64   OPTIONS(description = "Corporate-action split factor on the bar's ex-date (1.0 = none). Always NULL for Yahoo: its quote.close is already split-adjusted, so no reconstruction is needed. Column exists for schema parity with the shared bronze loader."),
+  div_cash        FLOAT64   OPTIONS(description = "Cash dividend per share on the bar's ex-date (0 = none). NULL for Yahoo (chart quote does not carry it). Schema parity with the shared loader."),
   source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
   datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
   PRIMARY KEY (symbol, candle_date) NOT ENFORCED,
@@ -527,8 +529,10 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_bronze.tiingo_etf_daily_raw`
   price_open      FLOAT64   OPTIONS(description = "Open price (raw, as delivered by Tiingo)."),
   price_high      FLOAT64   OPTIONS(description = "High price (raw, as delivered by Tiingo)."),
   price_low       FLOAT64   OPTIONS(description = "Low price (raw, as delivered by Tiingo)."),
-  price_close     FLOAT64   OPTIONS(description = "Close price (raw, as delivered by Tiingo)."),
+  price_close     FLOAT64   OPTIONS(description = "Close price (raw, unadjusted — neither split nor dividend adjusted, as delivered by Tiingo). The silver consolidation rebuilds a split-only close from split_factor so it matches Yahoo's split-adjusted basis (T-21)."),
   volume_traded   FLOAT64   OPTIONS(description = "Traded volume as delivered by Tiingo."),
+  split_factor    FLOAT64   OPTIONS(description = "Tiingo splitFactor on the bar's ex-date (1.0 = no split, e.g. 3.0 for a 3:1). Raw provider field; the silver step back-adjusts the raw close by the product of split_factors with ex_date > D to reconstruct a split-only-adjusted level (T-21)."),
+  div_cash        FLOAT64   OPTIONS(description = "Tiingo divCash: cash dividend per share on the bar's ex-date (0 = none). Raw provider field; NOT applied to the stored close (the series is price-return, not total-return). Kept for auditability / a possible future total-return basis."),
   source_id       INT64     OPTIONS(description = "FK to prod_trade_control.source_priority."),
   datetime_update TIMESTAMP OPTIONS(description = "Download/upsert execution timestamp (audit)."),
   PRIMARY KEY (symbol, candle_date) NOT ENFORCED,
@@ -572,9 +576,9 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_silver.ohlcv_validated` (
   PRIMARY KEY (symbol, temporality, time_period_start) NOT ENFORCED,
   FOREIGN KEY (source_id) REFERENCES `trade-390514.prod_trade_control.source_priority`(source_id) NOT ENFORCED
 )
-PARTITION BY DATE(time_period_start)
+PARTITION BY TIMESTAMP_TRUNC(time_period_start, MONTH)
 CLUSTER BY symbol, temporality
-OPTIONS(description = "Conformed, typed and de-duplicated OHLCV (one row per symbol/temporality/period), chosen by source priority.");
+OPTIONS(description = "Conformed, typed and de-duplicated multi-asset OHLCV (one row per symbol/temporality/period), chosen by source priority. Partitioned by MONTH: the Strategy-3 ETF history reaches 1993 (SPY), so daily-grained partitions over 33+ years would exceed BigQuery's 10000-partitions-per-table cap (DAY tops out ~27 yr). Changing granularity needs DROP + recreate.");
 
 CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_silver.rsi_features` (
   symbol            STRING    NOT NULL OPTIONS(description = "Asset."),
@@ -655,6 +659,59 @@ scaled AS (
 SELECT search_term, trend_date,
        100 * SAFE_DIVIDE(v, MAX(v) OVER (PARTITION BY search_term)) AS interest
 FROM scaled;
+
+
+-- ---------------------------------------------------------------------
+-- prod_trade_silver — multi-asset weekly returns / excess returns / realized vol
+-- (Strategy 3 TSMOM feature layer, T-21). Pure view over silver.ohlcv_validated
+-- (temporality='1w', one row per symbol/week, Monday→Sunday) joined point-in-time
+-- to the risk-free rate. Excess return uses FRED DFF (effective fed funds, NOT
+-- revised → as-of obs_date, no vintage). The level is split-adjusted price-return
+-- (conform reconciles Tiingo to Yahoo's split-only basis), NOT total-return.
+-- Annualisation is a uniform ×√52 across all assets (sidesteps the 252-vs-365
+-- trading-calendar split between ETFs and BTC). T-22 (TSMOM) cumulates the weekly
+-- excess returns over its formation horizon and scales by realized_vol_26w.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW `trade-390514.prod_trade_silver.vw_asset_returns_weekly`
+OPTIONS(description = "Weekly (Monday→Sunday) per-symbol returns for the Strategy-3 universe — the TSMOM feature layer (T-21). Columns: symbol, week_start (the week's Monday), price_close, simple_return (P_t/P_{t-1}-1), log_return (ln P_t/P_{t-1}), dff_annual_pct (effective fed funds %, FRED DFF point-in-time: latest obs on/before week_start; DFF is not revised so no vintage), rf_week ((1+DFF/100)^(7/365)-1), excess_return (simple_return - rf_week), excess_log_return (log_return - ln(1+rf_week)), realized_vol_26w (stddev of the last 26 weekly log-returns × √52; NULL during the 26-week warm-up, same NULL contract as the RSI). Annualisation is a uniform ×√52 across all assets. Prices are split-adjusted price-return (conform reconciles Tiingo to Yahoo's split-only basis), NOT total-return. Built on silver.ohlcv_validated (1w) + bronze.fred_dff_daily_raw.")
+AS
+WITH wk AS (
+  SELECT symbol, DATE(time_period_start) AS week_start, price_close
+  FROM `trade-390514.prod_trade_silver.ohlcv_validated`
+  WHERE temporality = '1w' AND price_close IS NOT NULL
+),
+rets AS (
+  SELECT
+    symbol, week_start, price_close,
+    SAFE_DIVIDE(price_close, LAG(price_close) OVER w) - 1 AS simple_return,
+    LN(SAFE_DIVIDE(price_close, LAG(price_close) OVER w))  AS log_return,
+    ROW_NUMBER() OVER w - 1                                AS i
+  FROM wk
+  WINDOW w AS (PARTITION BY symbol ORDER BY week_start)
+),
+-- Risk-free point-in-time: the latest DFF observation on/before the week's Monday.
+-- DFF is not revised, so the as-of obs_date IS the vintage. The 1990-01-01 floor
+-- only bounds the scan (earliest ETF is SPY 1993); DFF history starts 1954.
+rf AS (
+  SELECT r.symbol, r.week_start, d.obs_value AS dff_annual_pct
+  FROM rets r
+  LEFT JOIN `trade-390514.prod_trade_bronze.fred_dff_daily_raw` d
+    ON d.obs_date <= r.week_start AND d.obs_date >= '1990-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY r.symbol, r.week_start ORDER BY d.obs_date DESC) = 1
+)
+SELECT
+  r.symbol, r.week_start, r.price_close, r.simple_return, r.log_return,
+  rf.dff_annual_pct,
+  POW(1 + rf.dff_annual_pct / 100, 7 / 365) - 1                                  AS rf_week,
+  r.simple_return - (POW(1 + rf.dff_annual_pct / 100, 7 / 365) - 1)              AS excess_return,
+  r.log_return    - LN(POW(1 + rf.dff_annual_pct / 100, 7 / 365))               AS excess_log_return,
+  IF(r.i >= 26,
+     STDDEV_SAMP(r.log_return) OVER (
+       PARTITION BY r.symbol ORDER BY r.week_start ROWS BETWEEN 25 PRECEDING AND CURRENT ROW
+     ) * SQRT(52),
+     NULL)                                                                       AS realized_vol_26w
+FROM rets r
+LEFT JOIN rf USING (symbol, week_start);
 
 
 -- ---------------------------------------------------------------------

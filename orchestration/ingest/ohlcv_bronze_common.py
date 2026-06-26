@@ -62,7 +62,11 @@ def build_row(symbol: str, record: dict, source_id: int, fetched_at: datetime | 
 
     ``record`` is the provider-agnostic shape the fetch/parse layer returns:
     ``{"date", "open", "high", "low", "close", "volume"}`` (``date`` is a
-    :class:`datetime.date`). Pure mapping — no I/O, no transforms.
+    :class:`datetime.date`), optionally with ``split_factor``/``div_cash`` when
+    the provider delivers corporate actions (Tiingo does; Yahoo's already
+    split-adjusted close does not, so they stay ``None``). Pure mapping — no I/O,
+    no transforms; the raw split factor is what the silver step uses to rebuild a
+    split-only close (T-21).
     """
     return {
         "symbol": symbol,
@@ -72,6 +76,8 @@ def build_row(symbol: str, record: dict, source_id: int, fetched_at: datetime | 
         "price_low": _as_float(record.get("low")),
         "price_close": _as_float(record.get("close")),
         "volume_traded": _as_float(record.get("volume")),
+        "split_factor": _as_float(record.get("split_factor")),
+        "div_cash": _as_float(record.get("div_cash")),
         "source_id": source_id,
         "datetime_update": fetched_at or datetime.now(timezone.utc),
     }
@@ -117,14 +123,16 @@ WHEN MATCHED THEN UPDATE SET
   price_low       = S.price_low,
   price_close     = S.price_close,
   volume_traded   = S.volume_traded,
+  split_factor    = S.split_factor,
+  div_cash        = S.div_cash,
   source_id       = S.source_id,
   datetime_update = S.datetime_update
 WHEN NOT MATCHED THEN INSERT (
   symbol, candle_date, price_open, price_high, price_low, price_close,
-  volume_traded, source_id, datetime_update
+  volume_traded, split_factor, div_cash, source_id, datetime_update
 ) VALUES (
   S.symbol, S.candle_date, S.price_open, S.price_high, S.price_low, S.price_close,
-  S.volume_traded, S.source_id, S.datetime_update
+  S.volume_traded, S.split_factor, S.div_cash, S.source_id, S.datetime_update
 )
 """
 
@@ -139,6 +147,8 @@ def _struct_param(row: dict) -> bigquery.StructQueryParameter:
         bigquery.ScalarQueryParameter("price_low", "FLOAT64", row["price_low"]),
         bigquery.ScalarQueryParameter("price_close", "FLOAT64", row["price_close"]),
         bigquery.ScalarQueryParameter("volume_traded", "FLOAT64", row["volume_traded"]),
+        bigquery.ScalarQueryParameter("split_factor", "FLOAT64", row["split_factor"]),
+        bigquery.ScalarQueryParameter("div_cash", "FLOAT64", row["div_cash"]),
         bigquery.ScalarQueryParameter("source_id", "INT64", row["source_id"]),
         bigquery.ScalarQueryParameter("datetime_update", "TIMESTAMP", row["datetime_update"]),
     )

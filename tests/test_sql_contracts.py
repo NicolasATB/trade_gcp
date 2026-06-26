@@ -111,10 +111,26 @@ class TestConformMultiSourceRead:
         assert "WHERE rn = 1" in normalised
         assert conform._SOURCE_PRIORITY_TABLE in rendered
 
-    def test_deduplicates_per_candle_date(self, rendered):
-        # Raw symbols differ per exchange (BTC/USD vs BTC/USDT) but normalise to
-        # one canonical symbol, so the dedup key must be the date alone.
-        assert "PARTITION BY b.candle_date" in _norm(rendered)
+    def test_deduplicates_per_symbol_and_date(self, rendered):
+        # Multi-asset: nine symbols coexist (BTC + eight ETFs), so the dedup key is
+        # (symbol, candle_date), not the date alone. BTC's two raw exchange symbols
+        # both canonicalise to BTCUSD in SQL, so they still collapse correctly.
+        assert "PARTITION BY b.symbol, b.candle_date" in _norm(rendered)
+
+    def test_btc_branches_canonicalise_symbol(self, rendered):
+        # BTC tables are single-symbol per exchange → a literal 'BTCUSD' so the
+        # dedup key lines up with the canonical silver symbol.
+        assert "'BTCUSD' AS symbol" in rendered
+
+    def test_tiingo_branch_split_adjusts_to_yahoo_basis(self, rendered):
+        # Tiingo's raw close is divided by the product of split factors whose
+        # ex-date is AFTER the bar, reconciling it to Yahoo's split-adjusted basis
+        # (T-21). The split lookup is unbounded (s.candle_date > tt.candle_date),
+        # so a chunk ending before a split is still adjusted.
+        normalised = _norm(rendered)
+        assert "price_close / f AS price_close" in normalised
+        assert "SUM(LN(s.split_factor))" in normalised
+        assert "s.candle_date > tt.candle_date" in normalised
 
 
 class TestSignalsReadFilters:

@@ -1,13 +1,16 @@
 """
-Stage 1 — bronze → silver (ohlcv_validated).
+Stage 1 — bronze → silver (ohlcv_validated), multi-asset.
 
-Reads daily candles from every bronze candle table (Bitstamp for the
-pre-Binance history up to 2017-08-16, Binance from 2017-08-17 onward) for the
-``[start_date, end_date]`` range, consolidates them by source priority
-(business rule: the source with the **highest** ``priority`` in
-``prod_trade_control.source_priority`` wins when more than one source covers
-the same date), normalises fields to the canonical OHLCV schema, writes to a
-staging table, and merges into ``prod_trade_silver.ohlcv_validated``.
+Reads daily candles for the ``[start_date, end_date]`` range from every bronze
+candle table — BTC spot (Bitstamp for the pre-Binance history up to 2017-08-16,
+Binance from 2017-08-17 onward) plus the eight Strategy-3 ETFs from two competing
+sources (Yahoo primary, Tiingo fallback) — canonicalises the symbol, reconciles
+Tiingo's raw close to Yahoo's split-adjusted basis (split-only back-adjustment,
+T-21), consolidates by source priority (business rule: the source with the
+**highest** ``priority`` in ``prod_trade_control.source_priority`` wins when more
+than one source covers the same ``(symbol, date)``), normalises fields to the
+canonical OHLCV schema, writes to a staging table, and merges into
+``prod_trade_silver.ohlcv_validated``.
 
 Idempotency: the staging table is truncated before the Beam write; the
 final MERGE upserts on the natural key (symbol, temporality,
@@ -34,12 +37,19 @@ from google.cloud import bigquery
 logger = logging.getLogger(__name__)
 
 _PROJECT = "trade-390514"
-# Every bronze candle table that feeds the canonical OHLCV. All share the same
-# shape (symbol, candle_date, OHLCV, source_id); add new sources here.
-_BRONZE_TABLES = [
+# BTC candle tables: single canonical symbol BTCUSD; the raw close is the
+# conformed value (crypto spot has no splits/dividends to adjust).
+_BTC_BRONZE_TABLES = [
     "prod_trade_bronze.bitstamp_btcusd_daily_raw",  # pre-Binance history (≤ 2017-08-16)
     "prod_trade_bronze.binance_btcusd_daily_raw",   # 2017-08-17 onward
 ]
+# ETF tables (Strategy 3 universe): symbol is already canonical (SPY, EFA, …).
+# Yahoo's close is split-adjusted as delivered; Tiingo's is raw and gets the
+# split-only back-adjustment below, so both sources share one basis (T-21).
+_YAHOO_ETF_TABLE = "prod_trade_bronze.yahoo_etf_daily_raw"
+_TIINGO_ETF_TABLE = "prod_trade_bronze.tiingo_etf_daily_raw"
+# Every bronze table the consolidation reads (BTC spot + both ETF sources).
+_BRONZE_TABLES = [*_BTC_BRONZE_TABLES, _YAHOO_ETF_TABLE, _TIINGO_ETF_TABLE]
 _SOURCE_PRIORITY_TABLE = "prod_trade_control.source_priority"
 _STAGING = "prod_trade_silver.ohlcv_validated_staging"
 _TARGET = "prod_trade_silver.ohlcv_validated"
@@ -63,21 +73,52 @@ _STAGING_SCHEMA = {
     ]
 }
 
-# One UNION ALL branch per bronze table; each branch prunes its own
-# candle_date partition.
-_READ_BRONZE_BRANCH = """  SELECT symbol, candle_date, price_open, price_high, price_low,
+# UNION ALL branches, one family at a time. Every branch projects the SAME
+# columns (canonical symbol, candle_date, OHLCV, source_id) and prunes its own
+# candle_date partition. The canonical symbol is set in SQL: a literal 'BTCUSD'
+# for the BTC tables (single-symbol per exchange), a passthrough for the ETF
+# tables (already canonical), so the consolidation dedups per (symbol, date).
+_READ_BTC_BRANCH = """  SELECT 'BTCUSD' AS symbol, candle_date, price_open, price_high, price_low,
          price_close, volume_traded, source_id
   FROM `{project}.{table}`
   WHERE candle_date BETWEEN '{start_date}' AND '{end_date}'"""
 
+# Yahoo ETF: close already split-adjusted as delivered → passthrough.
+_READ_YAHOO_ETF_BRANCH = """  SELECT symbol, candle_date, price_open, price_high, price_low,
+         price_close, volume_traded, source_id
+  FROM `{project}.{table}`
+  WHERE candle_date BETWEEN '{start_date}' AND '{end_date}'"""
+
+# Tiingo ETF: raw close → split-ONLY back-adjusted to Yahoo's basis (T-21). Divide
+# every price by f = product of split_factors whose ex-date is AFTER the bar
+# (volume scales the inverse way). The split lookup scans the WHOLE table (splits
+# are a handful, clustered by symbol), not the read window, so a chunk that ends
+# before a split is still adjusted correctly. Yahoo never needs this (pre-adjusted
+# close); BTC never needs this (no corporate actions).
+_READ_TIINGO_ETF_BRANCH = """  SELECT symbol, candle_date,
+         price_open / f AS price_open, price_high / f AS price_high,
+         price_low / f AS price_low, price_close / f AS price_close,
+         volume_traded * f AS volume_traded, source_id
+  FROM (
+    SELECT tt.symbol, tt.candle_date, tt.price_open, tt.price_high, tt.price_low,
+           tt.price_close, tt.volume_traded, tt.source_id,
+           IFNULL(EXP((
+             SELECT SUM(LN(s.split_factor))
+             FROM `{project}.{table}` AS s
+             WHERE s.symbol = tt.symbol AND s.candle_date > tt.candle_date
+               AND s.split_factor IS NOT NULL AND s.split_factor != 1.0
+           )), 1.0) AS f
+    FROM `{project}.{table}` AS tt
+    WHERE candle_date BETWEEN '{start_date}' AND '{end_date}'
+  )"""
+
 # Multi-source consolidation: business rule — the source with the HIGHEST
-# `priority` in source_priority wins when several sources cover the same date
-# (today Bitstamp ≤ 2017-08-16 and Binance ≥ 2017-08-17 are date-disjoint, so
-# the tie-break is a safety net). Deduplication is per candle_date, not per raw
-# symbol: raw symbols differ by exchange (BTC/USD vs BTC/USDT) but every source
-# normalises to the same canonical BTCUSD downstream, so two sources on one
-# date would otherwise collide in the silver MERGE. Unregistered sources
-# (priority NULL) sort last (BigQuery DESC puts NULLs last).
+# `priority` in source_priority wins when several sources cover the same
+# (symbol, date). BTC: Bitstamp (4) > Binance (3), date-disjoint today so the
+# tie-break is a safety net. ETFs: Yahoo (2) > Tiingo (1), so a symbol/date Yahoo
+# gaps fails over to Tiingo. Dedup is per (symbol, candle_date): BTC's raw
+# exchange symbols both canonicalise to BTCUSD in SQL, and the eight ETFs are
+# distinct symbols. Unregistered sources (priority NULL) sort last (DESC → NULLs last).
 _READ_QUERY = """
 WITH bronze AS (
 {union_sql}
@@ -86,7 +127,7 @@ SELECT symbol, candle_date, price_open, price_high, price_low,
        price_close, volume_traded, source_id
 FROM (
   SELECT b.*, ROW_NUMBER() OVER (
-           PARTITION BY b.candle_date
+           PARTITION BY b.symbol, b.candle_date
            ORDER BY p.priority DESC
          ) AS rn
   FROM bronze AS b
@@ -97,17 +138,27 @@ WHERE rn = 1
 
 
 def _build_read_query(project: str, start_date, end_date) -> str:
-    """Render the multi-source bronze read for ``[start_date, end_date]``."""
-    union_sql = "\n  UNION ALL\n".join(
-        _READ_BRONZE_BRANCH.format(
-            project=project, table=table,
-            start_date=start_date.isoformat(), end_date=end_date.isoformat(),
-        )
-        for table in _BRONZE_TABLES
+    """Render the multi-asset, multi-source bronze read for ``[start_date, end_date]``.
+
+    BTC branches canonicalise to ``BTCUSD``; the Yahoo ETF branch passes its
+    already-split-adjusted close through; the Tiingo ETF branch back-adjusts its
+    raw close to the same split-only basis. All branches feed one priority dedup
+    per ``(symbol, candle_date)``.
+    """
+    s, e = start_date.isoformat(), end_date.isoformat()
+    branches = [
+        _READ_BTC_BRANCH.format(project=project, table=table, start_date=s, end_date=e)
+        for table in _BTC_BRONZE_TABLES
+    ]
+    branches.append(
+        _READ_YAHOO_ETF_BRANCH.format(project=project, table=_YAHOO_ETF_TABLE, start_date=s, end_date=e)
     )
+    branches.append(
+        _READ_TIINGO_ETF_BRANCH.format(project=project, table=_TIINGO_ETF_TABLE, start_date=s, end_date=e)
+    )
+    union_sql = "\n  UNION ALL\n".join(branches)
     return _READ_QUERY.format(
-        union_sql=union_sql, project=project,
-        priority_table=_SOURCE_PRIORITY_TABLE,
+        union_sql=union_sql, project=project, priority_table=_SOURCE_PRIORITY_TABLE,
     )
 
 # MERGE from staging → target on the natural key.
@@ -139,12 +190,6 @@ WHEN NOT MATCHED THEN INSERT (
   S.price_open, S.price_high, S.price_low, S.price_close, S.volume_traded, S.trades_count
 )
 """
-
-# Symbol normalisation: CCXT unified → canonical form used in silver/gold.
-_SYMBOL_MAP = {
-    "BTC/USDT": "BTCUSD",
-    "BTC/USD":  "BTCUSD",
-}
 
 # Aggregates daily rows in ohlcv_validated to a weekly candle and merges it
 # back into the same table with temporality='1w'.  Only the current week is
@@ -232,8 +277,14 @@ def _ts_str(ts) -> str:  # pragma: no cover - unused helper kept for symmetry wi
     return str(ts)
 
 
-class _NormaliseBinanceRow(beam.DoFn):
-    """Map ``binance_btcusd_daily_raw`` row → ``ohlcv_validated`` schema."""
+class _NormaliseOhlcvRow(beam.DoFn):
+    """Map a consolidated bronze row → ``ohlcv_validated`` schema.
+
+    The canonical ``symbol`` and the split-adjusted prices are already chosen in
+    the read query (BTC → ``BTCUSD``; ETFs passthrough / back-adjusted), so this
+    DoFn only reshapes the row: it derives the UTC day bounds and nulls
+    ``trades_count``.
+    """
 
     def process(self, element):
         candle_date = element["candle_date"]
@@ -246,10 +297,8 @@ class _NormaliseBinanceRow(beam.DoFn):
         tpe = datetime(candle_date.year, candle_date.month, candle_date.day,
                        23, 59, 59, tzinfo=timezone.utc)
 
-        symbol = _SYMBOL_MAP.get(element.get("symbol", "BTC/USDT"), "BTCUSD")
-
         yield {
-            "symbol":            symbol,
+            "symbol":            element["symbol"],
             "temporality":       "1d",
             "source_id":         element.get("source_id"),
             "datetime_update":   datetime.now(timezone.utc).isoformat(),
@@ -293,7 +342,7 @@ def run_conform(config: dict) -> None:  # pragma: no cover - Beam/Dataflow + Big
                 project=project,
                 gcs_location=config.get("temp_location"),
             )
-            | "Normalise" >> beam.ParDo(_NormaliseBinanceRow())
+            | "Normalise" >> beam.ParDo(_NormaliseOhlcvRow())
             | "WriteStaging" >> WriteToBigQuery(
                 table=f"{project}:{_STAGING}",
                 schema=_STAGING_SCHEMA,

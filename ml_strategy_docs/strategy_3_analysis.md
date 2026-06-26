@@ -65,13 +65,14 @@ source, Tiingo as a competing fallback. Crypto reuses the existing spot ingest
 (Binance/Bitstamp). Futures are deferred.**
 
 Futures are more cost-accurate but carry roll/contango and the point-in-time
-active-contract hygiene a v1 pipeline doesn't need. ETFs are simple, continuous and
-dividend/total-return inclusive — enough to exercise the multi-asset pipeline.
+active-contract hygiene a v1 pipeline doesn't need. ETFs are simple and continuous; the
+conformed close is **split-adjusted but not dividend-adjusted** (a price-return level, not
+total-return) — enough to exercise the multi-asset pipeline.
 
 | Asset class | Instrument (v1) | Source (primary / fallback) | Avoids roll? | Trade-off / rationale |
 |---|---|---|---|---|
-| Equity indices | Total-return ETF (e.g. SPY / EFA / EEM) | Yahoo / Tiingo | Yes | Liquid, dividend-inclusive proxy; futures add roll + active-contract tracking for no v1 gain. |
-| Gov. bonds | Treasury ETF (e.g. SHY / IEF / TLT) | Yahoo / Tiingo | Yes | Continuous total return without managing the roll calendar / cheapest-to-deliver. |
+| Equity indices | ETF (e.g. SPY / EFA / EEM) | Yahoo / Tiingo | Yes | Liquid proxy; close is split-adjusted price-return (not dividend-adjusted); futures add roll + active-contract tracking for no v1 gain. |
+| Gov. bonds | Treasury ETF (e.g. SHY / IEF / TLT) | Yahoo / Tiingo | Yes | Continuous split-adjusted level without managing the roll calendar / cheapest-to-deliver. |
 | Commodities | Physical (GLD) / broad ETF (e.g. DBC) | Yahoo / Tiingo | Partially | "No-roll" holds only for physically-backed ETFs; broad commodity ETFs are futures wrappers — roll/contango is **embedded in NAV**, not eliminated (a cost v1 does not isolate). |
 | FX | Currency ETF (e.g. UUP / FXE / FXY) | Yahoo / Tiingo | N/A | Thinner, embeds money-market carry + expense ratio vs spot/forwards; acceptable as a v1 directional proxy. |
 | Crypto (sleeve) | Spot BTC (Binance / Bitstamp) | existing ingest | Yes | Native spot, no roll; reuses the live pipeline, no new source. |
@@ -83,6 +84,19 @@ dividend/total-return inclusive — enough to exercise the multi-asset pipeline.
   sources (Yahoo primary, Tiingo fallback) **compete by `priority`** in the silver
   consolidation, so a source that starts failing / leaving gaps fails over to the other.
   `priority NULL` is reserved for single-source context series only.
+- **Both sources must share one adjustment basis, or the failover is unsound.** Validation
+  (2026-06-25) found Yahoo's `quote.close` is **split-adjusted, not dividend-adjusted**, while
+  Tiingo's `close` is **fully raw** — so they diverge by the split factor wherever a split
+  exists (EFA's 3:1 of 2005-06-09 made them differ ×3 pre-split; the other seven ETFs,
+  split-free in-window, agreed to <0.01%). The chosen v1 basis is **split-only**: continuous
+  *and* point-in-time-stable (split factors are exact and rarely revised, unlike a total-return
+  `adjClose` that providers rewrite on every new dividend). Tiingo is reconciled to it by
+  reconstructing split-only from its own per-bar `splitFactor`
+  (`adj_close = raw_close / Π(split_factor where ex_date > D)`), an **auditable silver step**
+  applied before the priority de-dup in `conform` — proven on EFA (divergence collapsed from
+  avg 10.1% / max 69% to avg 0.004%). T-21 stores Tiingo's `split_factor` / `div_cash` in bronze
+  (raw provider fields) to drive it. Neither source is dividend-adjusted, so the series is
+  **price-return, not total-return** — a documented v1 limitation.
 - **Per-instrument registration landed in T-20** (the bronze ingest ticket), alongside
   the bronze tables: Yahoo (`source_id` 16, priority 2) and Tiingo (17, priority 1) are
   seeded in `sql/DDL.sql`, competing in the silver consolidation — no orphan
