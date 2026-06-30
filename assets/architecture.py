@@ -222,7 +222,7 @@ CSHIFT = {                          # (dx, dy, extend_right) per cluster
     "df_box": (dx_app + dx_df, dy2, 0.0),
     "ml_box": (dx_app + dx_df + dx_ml, dy2, 0.0),
     "data_box": (dx_data, dy3, 60.0),   # widen right so the BigQuery label fits
-    "iac_box": (dx_iac, dy4, IAC_XPAD),
+    "iac_box": (dx_iac, dy4, IAC_XPAD + 7.5),
 }
 NSHIFT = {n: CSHIFT[c][:2] for c, ns in NODES_OF.items() for n in ns}
 
@@ -353,7 +353,7 @@ def helbow(p1, p2, frac=0.5):
 ARROWS: list[dict] = []
 
 
-def arrow(pts, color, label=None, dashed=False, both=False, ldx=0, ldy=-8, lxy=None):
+def arrow(pts, color, label=None, dashed=False, both=False, ldx=8, ldy=-8, lxy=None):
     ARROWS.append(dict(pts=pts, color=color, label=label, dashed=dashed,
                        both=both, ldx=ldx, ldy=ldy, lxy=lxy))
 
@@ -362,6 +362,7 @@ def arrow(pts, color, label=None, dashed=False, both=False, ldx=0, ldy=-8, lxy=N
 # (lxy) so they never sit on a box. Logic arrows use the inner vm/df boxes.
 band12 = (max(CB["src_box"][3], CB["out_box"][3]) + CB["app_box"][1]) / 2
 band23 = (CB["app_box"][3] + CB["data_box"][1]) / 2
+band34 = (CB["data_box"][3] + CB["iac_box"][1]) / 2
 
 
 def _ncx(nb):
@@ -374,27 +375,28 @@ def _dx(f):
 
 # -- data flow (solid) ------------------------------------------------------
 _ix, _ax = _ncx(NB["ingest"]), _ncx(NB["alert"])
-# download: straight vertical, aligned under Ingest
+# download: straight vertical, aligned under Ingest — label LEFT of arrow
 arrow([(_ix, CB["src_box"][3]), (_ix, EX(CB["vm_box"], NB["ingest"], "t")[1])],
-      BLUE, "download", lxy=(_ix, band12))
+      BLUE, "download", lxy=(_ix, band12), ldx=-53, ldy=0)
 # raw candles: straight vertical, shifted left of the Ingest column
 _raw_x = _ix - 80
 arrow([(_raw_x, CB["vm_box"][3]), (_raw_x, CB["data_box"][1])],
-      BLUE, "raw candles +\ncontext series", lxy=(_raw_x, band23))
+      BLUE, "raw candles +\ncontext series", lxy=(_raw_x, band23), ldx=-75, ldy=16)
 # launch: VM box right → Dataflow box left (label centred in the gap)
-arrow([R(CB["vm_box"]), L(CB["df_box"])], BLUE, "launch")
+arrow([R(CB["vm_box"]), L(CB["df_box"])], BLUE, "launch", ldx=0, ldy=-18)
 # last signal: straight vertical, shifted left — distinct x from raw candles
 _sig_x = _ax - 80
 arrow([(_sig_x, CB["data_box"][1]), (_sig_x, CB["vm_box"][3])],
-      BLUE, "last signal", lxy=(_sig_x, band23))
+      BLUE, "last signal", lxy=(_sig_x, band23), ldx=-50, ldy=4)
 # read/write: Dataflow box bottom → Data box RIGHT edge (one bend, double-headed).
 # Docks near the TOP of the right edge (fy=0.18) — swapped with the gold-views
 # arrow below so the two no longer cross each other.
 _df_cx = _ncx(NB["df"])
+_df_cx_v = _df_cx + 22.5  # vertical leg shifted 30px right of Dataflow centre
 _rw_dock = pt(CB["data_box"], 1.0, 0.18)
-arrow([(_df_cx, CB["df_box"][3]), (_df_cx, _rw_dock[1]), _rw_dock],
+arrow([(_df_cx_v, CB["df_box"][3]), (_df_cx_v, _rw_dock[1]), _rw_dock],
       BLUE, "read OHLCV + params /\nwrite RSI + signal", both=True,
-      lxy=(_df_cx, _rw_dock[1]), ldy=-16)
+      lxy=(_df_cx_v, _rw_dock[1]), ldx=-111, ldy=-8)
 # FILE_LOADS: Cloud Storage ↔ BigQuery (intra-box, between the two icons)
 arrow([R(NB["gcs"]), L(NB["bq"])], GREY, "FILE_LOADS /\nexport staging",
       dashed=True, both=True)
@@ -402,7 +404,7 @@ arrow([R(NB["gcs"]), L(NB["bq"])], GREY, "FILE_LOADS /\nexport staging",
 # Forced horizontal at GitHub's icon centre — the two icons aren't vertically
 # aligned (different glyph heights), so a straight R()→L() pair would slant.
 _repo_y = R(NB["repo"])[1]
-arrow([R(NB["repo"]), (NB["ci"][0], _repo_y)], GREY, "push / PR", dashed=True)
+arrow([R(NB["repo"]), (NB["ci"][0], _repo_y)], GREY, "push / PR", dashed=True, ldx=-13)
 # send only if changed: VM box → Outputs box (up and over the top)
 _a = EX(CB["vm_box"], NB["alert"], "t")
 _t = EX(CB["out_box"], NB["telegram"], "b")
@@ -415,8 +417,8 @@ arrow([_a, (_a[0], T(CB["app_box"])[1] - 30), (_t[0], T(CB["app_box"])[1] - 30),
 _lk = EX(CB["out_box"], NB["looker"], "b")     # point under Looker, on the outputs box
 _gv = R(CB["data_box"])
 arrow([_gv, (_lk[0], _gv[1]), _lk],
-      PURPLE, "gold training +\nmonitor views",
-      lxy=((_gv[0] + _lk[0]) / 2, _gv[1]), ldy=-14)
+      GREEN, "gold training +\nmonitor views",
+      lxy=(_lk[0], _gv[1]), ldx=-68, ldy=-8)
 # Modeling (offline): Data box right ↔ up into the dashed Modeling box. Docks at
 # fy=0.82 on the right edge — below the other two — so the three connections
 # stack without crossing. Dashed: a manual research run, never the daily DAG.
@@ -427,14 +429,14 @@ _ml_cx = _ncx(NB["ml"])
 _mv = pt(CB["data_box"], 1.0, 0.82)
 arrow([_mv, (_ml_cx, _mv[1]), (_ml_cx, CB["ml_box"][3])],
       GREY, "reads gold training views /\nwrites experiment_runs +\nversioned param row (offline)",
-      dashed=True, both=True, lxy=(_ml_cx, _mv[1]), ldy=-16)
+      dashed=True, both=True, lxy=(_ml_cx, _mv[1]), ldx=-134, ldy=-8)
 
 # -- provisioning (dashed) — exit the IaC box LEFT, up the FAR-left margin, and
 # enter the target boxes' LEFT edge pointing left→right.
 _lx = min(CB["data_box"][0], CB["app_box"][0]) - 50
 arrow([L(CB["iac_box"]), (_lx, L(CB["iac_box"])[1]),
        (_lx, L(CB["data_box"])[1]), L(CB["data_box"])],
-      GREY, "provisions", dashed=True, ldx=0, ldy=-12)
+      GREY, "provisions", dashed=True, lxy=(_lx, band34), ldx=50, ldy=9)
 arrow([(_lx, L(CB["data_box"])[1]), (_lx, L(CB["app_box"])[1]), L(CB["app_box"])],
       GREY, None, dashed=True)
 
