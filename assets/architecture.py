@@ -189,6 +189,7 @@ NB = {k: _nb_by_id[v] for k, v in NODE_IDS.items()}
 # ---------------------------------------------------------------------------
 GAP = 60.0                         # 80 px at 96 dpi
 APAD = 20.0                        # inner padding of the app box around Dataflow
+IAC_XPAD = 40.0                    # extra space left of CI in the IaC box (label breathing room)
 NAME2KEY = {v: k for k, v in CLUSTER_NAMES.items()}
 NODES_OF = {
     "src_box": ["s_binance", "s_fred", "s_coinmetrics", "s_yahoo"],
@@ -221,7 +222,7 @@ CSHIFT = {                          # (dx, dy, extend_right) per cluster
     "df_box": (dx_app + dx_df, dy2, 0.0),
     "ml_box": (dx_app + dx_df + dx_ml, dy2, 0.0),
     "data_box": (dx_data, dy3, 60.0),   # widen right so the BigQuery label fits
-    "iac_box": (dx_iac, dy4, 0.0),
+    "iac_box": (dx_iac, dy4, IAC_XPAD),
 }
 NSHIFT = {n: CSHIFT[c][:2] for c, ns in NODES_OF.items() for n in ns}
 
@@ -295,6 +296,12 @@ NB["df"] = (NB["df"][0] + _df_dx, NB["df"][1], NB["df"][2] + _df_dx, NB["df"][3]
 _ml_dx = (CB["ml_box"][0] + CB["ml_box"][2]) / 2 - (NB["ml"][0] + NB["ml"][2]) / 2
 svg = _shift_node(svg, NODE_IDS["ml"], _ml_dx, 0.0)
 NB["ml"] = (NB["ml"][0] + _ml_dx, NB["ml"][1], NB["ml"][2] + _ml_dx, NB["ml"][3])
+
+# Spread CI and Terraform right by IAC_XPAD so the "push/PR" arrow label has
+# breathing room between the GitHub icon and the CI icon.
+for _n in ("ci", "iac"):
+    svg = _shift_node(svg, NODE_IDS[_n], IAC_XPAD, 0.0)
+    NB[_n] = (NB[_n][0] + IAC_XPAD, NB[_n][1], NB[_n][2] + IAC_XPAD, NB[_n][3])
 
 # Inline every icon PNG as base64 so the SVG is self-contained.
 def _inline(match: re.Match) -> str:
@@ -391,6 +398,11 @@ arrow([(_df_cx, CB["df_box"][3]), (_df_cx, _rw_dock[1]), _rw_dock],
 # FILE_LOADS: Cloud Storage ↔ BigQuery (intra-box, between the two icons)
 arrow([R(NB["gcs"]), L(NB["bq"])], GREY, "FILE_LOADS /\nexport staging",
       dashed=True, both=True)
+# push triggers CI: GitHub → GitHub Actions (intra-box, between the two icons).
+# Forced horizontal at GitHub's icon centre — the two icons aren't vertically
+# aligned (different glyph heights), so a straight R()→L() pair would slant.
+_repo_y = R(NB["repo"])[1]
+arrow([R(NB["repo"]), (NB["ci"][0], _repo_y)], GREY, "push / PR", dashed=True)
 # send only if changed: VM box → Outputs box (up and over the top)
 _a = EX(CB["vm_box"], NB["alert"], "t")
 _t = EX(CB["out_box"], NB["telegram"], "b")
