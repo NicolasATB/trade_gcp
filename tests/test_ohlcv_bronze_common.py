@@ -218,6 +218,7 @@ class TestDdlContract:
         assert "split_factor" in block
         assert "div_cash" in block
 
+
     def test_yahoo_source_16_outranks_tiingo_17(self, ddl):
         # Yahoo (16) is primary with the higher priority; Tiingo (17) is fallback.
         assert "SELECT 16 AS source_id" in ddl
