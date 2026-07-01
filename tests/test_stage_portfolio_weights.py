@@ -22,7 +22,6 @@ from dataflow.stages.portfolio_weights_stage import (
 from dataflow.stages.tsmom_signal_stage import _week_start_to_ts
 from dataflow.strategy.portfolio import PortfolioParams, Scheme
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

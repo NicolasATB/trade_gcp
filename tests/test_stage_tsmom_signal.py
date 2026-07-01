@@ -12,17 +12,16 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from dataflow.stages.portfolio_weights_stage import (
+    _TRIGGER_PARAMS_KEYS_READ_BY_STAGE_B,
+)
 from dataflow.stages.tsmom_signal_stage import (
     _TRIGGER_PARAMS_KEYS_WRITTEN,
     _build_trigger_params,
     _signal_label,
     _week_start_to_ts,
 )
-from dataflow.stages.portfolio_weights_stage import (
-    _TRIGGER_PARAMS_KEYS_READ_BY_STAGE_B,
-)
 from dataflow.strategy.tsmom_signal import TsmomParams
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

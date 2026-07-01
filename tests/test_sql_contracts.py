@@ -20,7 +20,13 @@ from datetime import date
 
 import pytest
 
-from dataflow.stages import conform, rsi, signals, tsmom_signal_stage, portfolio_weights_stage
+from dataflow.stages import (
+    conform,
+    portfolio_weights_stage,
+    rsi,
+    signals,
+    tsmom_signal_stage,
+)
 
 
 def _norm(sql: str) -> str:

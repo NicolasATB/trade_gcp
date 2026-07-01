@@ -40,15 +40,12 @@ from apache_beam.options.pipeline_options import PipelineOptions
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
-from dataflow.strategy.portfolio import PortfolioParams, Scheme, build_portfolio
 from dataflow.stages.tsmom_signal_stage import (
-    _PARAMS_TABLE,
     _PROJECT,
-    _READ_ACTIVE_PARAMS,
     _STRATEGY_ID,
-    _TRIGGER_PARAMS_KEYS_WRITTEN,
     _fetch_active_params,
 )
+from dataflow.strategy.portfolio import PortfolioParams, Scheme, build_portfolio
 from orchestration.ingest.strategy_3_universe import FULL_UNIVERSE
 
 logger = logging.getLogger(__name__)

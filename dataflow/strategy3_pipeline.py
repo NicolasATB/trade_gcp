@@ -47,10 +47,9 @@ import logging
 from dataflow.pipeline import (
     _apply_worker_defaults,
     _extract_temp_location,
-    _runner_is_dataflow,
 )
-from dataflow.stages.tsmom_signal_stage import run_tsmom_signal
 from dataflow.stages.portfolio_weights_stage import run_portfolio_weights
+from dataflow.stages.tsmom_signal_stage import run_tsmom_signal
 
 logger = logging.getLogger(__name__)
 
