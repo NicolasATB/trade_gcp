@@ -791,6 +791,93 @@ WHEN NOT MATCHED THEN INSERT (
 
 
 -- ---------------------------------------------------------------------
+-- prod_trade_strategy — versioned TSMOM parameters (T-24)
+-- One table per strategy; name matches strategy.strategy_name.
+-- This table is SINGLE-STRATEGY by design (mirroring strategy_rsi_daily_week):
+-- it has no strategy_id column because the table itself is the scope.
+-- Active-version invariant: exactly one is_active=TRUE row at all times,
+-- enforced by an atomic flip on promotion (not a read-side LIMIT 1):
+--   UPDATE strategy_tsmom_multiasset SET is_active=(param_version=@v) WHERE TRUE;
+-- ORDER BY param_version DESC LIMIT 1 is kept as secondary defence only.
+-- See strategy_3_analysis.md "Modeling lifecycle" for the promotion pattern
+-- Epic 8 (T-25 backtest engine, T-26 baselines, T-27 holdout) inherits.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.strategy_tsmom_multiasset` (
+  param_version     INT64     NOT NULL OPTIONS(description = "Monotonically increasing version; exactly one is_active=TRUE row at a time (enforced by atomic flip on promotion)."),
+  is_active         BOOL      NOT NULL OPTIONS(description = "Only the active version is applied by the signal and portfolio-weights stages."),
+  formation_horizon INT64     NOT NULL OPTIONS(description = "Trailing weekly periods L summed into the formation excess return (T-22). A counted trial."),
+  vol_target        FLOAT64   NOT NULL OPTIONS(description = "Annualised target volatility the per-instrument position is scaled to (T-22). A counted trial."),
+  vol_lookback      INT64     NOT NULL OPTIONS(description = "Periods behind realized_vol_26w in the T-21 view; recorded for full trial description."),
+  periods_per_year  INT64     NOT NULL OPTIONS(description = "Annualisation factor of the cadence (52 for weekly)."),
+  max_leverage      FLOAT64   OPTIONS(description = "Optional cap on the vol-scaling factor; NULL leaves it uncapped."),
+  scheme            STRING    NOT NULL OPTIONS(description = "Portfolio weighting scheme (T-23): equal_weight / inverse_vol / risk_parity."),
+  crypto_cap        FLOAT64   OPTIONS(description = "Maximum gross weight of the BTC sleeve; NULL leaves it uncapped. A counted trial."),
+  created_at        TIMESTAMP OPTIONS(description = "Row creation timestamp."),
+  notes             STRING    OPTIONS(description = "Rationale or source for these parameters."),
+  PRIMARY KEY (param_version) NOT ENFORCED
+)
+OPTIONS(description = "Versioned parameters for the cross-asset TSMOM strategy (T-22 signal + T-23 portfolio). Calibrated offline (Epic 8); decoupled from the gold materialisation stages.");
+
+-- Register strategy id=3 in the catalog (idempotent).
+MERGE `trade-390514.prod_trade_strategy.strategy` T
+USING (SELECT 3 AS strategy_id) S
+ON T.strategy_id = S.strategy_id
+WHEN NOT MATCHED THEN INSERT (
+  strategy_id, strategy_name, description, indicator_type, is_active, created_at
+) VALUES (
+  3,
+  'strategy_tsmom_multiasset',
+  'Cross-asset time-series momentum: sign of the cumulative excess return over a formation horizon, vol-scaled per instrument (T-22), combined into portfolio weights (T-23). Parameters calibrated offline by a grid search (Epic 8).',
+  'TSMOM',
+  TRUE,
+  CURRENT_TIMESTAMP()
+);
+
+-- Seed baseline parameters v1 (idempotent).
+-- Placeholder values — replace after Epic 8 calibration (T-25 backtest engine,
+-- T-26 baselines, T-27 holdout single evaluation) selects the winning trial.
+-- Promotion pattern (Epic 8): UPDATE … SET is_active=(param_version=@v) WHERE TRUE;
+MERGE `trade-390514.prod_trade_strategy.strategy_tsmom_multiasset` T
+USING (SELECT 1 AS param_version) S
+ON T.param_version = S.param_version
+WHEN NOT MATCHED THEN INSERT (
+  param_version, is_active, formation_horizon, vol_target, vol_lookback,
+  periods_per_year, max_leverage, scheme, crypto_cap, created_at, notes
+) VALUES (
+  1, TRUE, 52, 0.10, 26,
+  52, NULL, 'inverse_vol', 0.20, CURRENT_TIMESTAMP(),
+  'Baseline seed — placeholder until Epic 8 (T-25 backtest engine, T-26 baselines, T-27 holdout) selects calibrated values via the trial grid.'
+);
+
+
+-- ---------------------------------------------------------------------
+-- prod_trade_gold — portfolio weights (T-24, Strategy 3)
+-- One row per rebalance week × instrument × book (with-crypto / without-crypto).
+-- Stage B (dataflow/stages/portfolio_weights_stage.py) reads fact_signals
+-- (strategy_id=3) and feeds T-23's build_portfolio; it is a gold→gold stage
+-- called AFTER Stage A's MERGE commits (two sequential pipelines, not one graph).
+-- Natural key: (week_start, strategy_id, symbol, include_crypto).
+-- Partition by week_start (DATE, weekly cadence → ~1,700 weeks 1993-2026,
+-- well under the 4,000/DML and 10,000/table caps — no chunking needed).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_gold.fact_portfolio_weights` (
+  week_start      DATE      NOT NULL OPTIONS(description = "Rebalance week's Monday (matches vw_asset_returns_weekly.week_start and DATE(fact_signals.signal_start))."),
+  strategy_id     INT64     NOT NULL OPTIONS(description = "FK to prod_trade_strategy.strategy (always 3 for TSMOM)."),
+  symbol          STRING    NOT NULL OPTIONS(description = "Instrument symbol (SPY, EFA, IEF, TLT, GLD, DBC, UUP, FXY, BTC)."),
+  include_crypto  BOOL      NOT NULL OPTIONS(description = "TRUE = with-BTC book, FALSE = without-BTC book (T-23 two-book output)."),
+  scheme          STRING    NOT NULL OPTIONS(description = "Weighting scheme used (audit copy of the active param row at compute time)."),
+  weight          FLOAT64   NOT NULL OPTIONS(description = "Gross-1 portfolio weight (signed). BTC leg additionally capped by crypto_cap in the with-crypto book."),
+  param_version   INT64     NOT NULL OPTIONS(description = "FK to strategy_tsmom_multiasset.param_version that produced this row."),
+  created_at      TIMESTAMP OPTIONS(description = "When the weight was computed by Stage B."),
+  PRIMARY KEY (week_start, strategy_id, symbol, include_crypto) NOT ENFORCED,
+  FOREIGN KEY (strategy_id) REFERENCES `trade-390514.prod_trade_strategy.strategy`(strategy_id) NOT ENFORCED
+)
+PARTITION BY week_start
+CLUSTER BY strategy_id, include_crypto
+OPTIONS(description = "Cross-asset TSMOM portfolio weights (T-24): one row per rebalance week / instrument / book variant. Produced by Stage B (portfolio_weights_stage.py) from Stage A's fact_signals rows for strategy_id=3.");
+
+
+-- ---------------------------------------------------------------------
 -- prod_trade_gold — consumption views (ML training sets)
 -- Curated, read-only joins that line up BTC close, RSI, MVRV Z-Score and the
 -- macro feature series (DXY, 10Y Treasury, Fed funds, M2) in one row for model
