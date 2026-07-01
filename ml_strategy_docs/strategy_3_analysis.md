@@ -13,7 +13,7 @@
 | [Instrument universe](#instrument-universe) | T-19 | ✅ done |
 | [TSMOM signal](#tsmom-signal) | T-22 | ✅ done |
 | [Portfolio construction](#portfolio-construction) | T-23 | ✅ done |
-| [Modeling lifecycle & tooling](#modeling-lifecycle--tooling) | T-24/25 | 🗺️ planned |
+| [Modeling lifecycle & tooling](#modeling-lifecycle--tooling) | T-24/T-25 | ✅ T-24 / ⏳ T-25 |
 | [Validation methodology](#validation-methodology) | Epic 8 | ✍️ drafted |
 | [Baselines](#baselines) | T-26 | ⏳ pending |
 | [Verdict](#verdict) | T-27/28 | ⏳ pending |
@@ -226,9 +226,10 @@ be documented and narrowed and that limitation reported.
 
 > Status: **done (T-22).** Pure, GCP-free signal logic in
 > [`../dataflow/strategy/tsmom_signal.py`](../dataflow/strategy/tsmom_signal.py),
-> unit-tested in `tests/test_tsmom_signal.py`. The gold materialisation and the
-> versioned parameter row are a separate ticket (T-24); the backtest engine
-> (T-25) reuses the same functions.
+> unit-tested in `tests/test_tsmom_signal.py`. Gold materialisation and the
+> versioned parameter row are done (T-24 — `dataflow/stages/tsmom_signal_stage.py`
+> writes `fact_signals` for strategy_id=3). The backtest engine (T-25) reuses the
+> same functions.
 
 **Signal = sign of the cumulative excess return over a formation horizon.** For
 instrument *i* at rebalance week *t*, sum the trailing `formation_horizon` weekly
@@ -269,8 +270,9 @@ row is T-24.
 
 > Status: **done (T-23).** Pure, GCP-free cross-sectional logic in
 > [`../dataflow/strategy/portfolio.py`](../dataflow/strategy/portfolio.py),
-> unit-tested in `tests/test_portfolio.py`. The gold materialisation and the
-> versioned parameter row are a separate ticket (T-24); the backtest engine (T-25)
+> unit-tested in `tests/test_portfolio.py`. Gold materialisation and the
+> versioned parameter row are done (T-24 — `dataflow/stages/portfolio_weights_stage.py`
+> writes `fact_portfolio_weights` for strategy_id=3). The backtest engine (T-25)
 > reuses these functions.
 
 **From per-instrument positions to one weight book per week.** T-22 emits, per
@@ -329,9 +331,30 @@ T-21 view), not two silently-different ones.
 
 ## Modeling lifecycle & tooling
 
-> Status: **planned.** The offline apparatus that turns the pure signal/portfolio logic
-> into a calibrated, promoted strategy. Spans T-24 (promotion target) and T-25 (engine);
-> the daily pipeline is unaffected.
+> Status: **T-24 done / T-25 pending.** T-24 wired the pure T-22/T-23 functions into
+> two Beam stages and created the versioned parameter table; T-25 (backtest engine +
+> experiment ledger + promotion script) remains. The daily pipeline is unaffected.
+>
+> **T-24 deliverables:**
+> - `dataflow/stages/tsmom_signal_stage.py` — Stage A: silver `vw_asset_returns_weekly`
+>   → `gold.fact_signals` (strategy_id=3). Separate staging table (`fact_signals_tsmom_staging`)
+>   to avoid concurrent-run collision with the RSI job. MERGE is upsert-only (no WMBS
+>   branch); `strategy_id` in the ON clause prevents cross-strategy collisions.
+> - `dataflow/stages/portfolio_weights_stage.py` — Stage B: `fact_signals` (strategy_id=3)
+>   → `gold.fact_portfolio_weights`. Two weight books per week (include_crypto True/False).
+>   Called only after Stage A's MERGE returns (sequential pipelines, not one graph).
+> - `dataflow/strategy3_pipeline.py` — standalone entry point (`--stage all/tsmom_signal/
+>   portfolio_weights`). Not wired into the daily DAG; run manually until Epic 8 validates.
+> - `prod_trade_strategy.strategy_tsmom_multiasset` — versioned params table, seeded with
+>   param_version=1 (formation_horizon=52, vol_target=0.10, vol_lookback=26, scheme=inverse_vol,
+>   crypto_cap=0.20). **No `strategy_id` column — single-strategy by design** (one table per
+>   strategy, isolation by structure). Promotion pattern: atomic flip `WHERE TRUE`:
+>   `UPDATE strategy_tsmom_multiasset SET is_active=(param_version=@v) WHERE TRUE;`
+> - `prod_trade_gold.fact_portfolio_weights` — new gold table; natural key
+>   `(week_start, strategy_id, symbol, include_crypto)`.
+> - `experiment_runs`, `research/run_experiments.py`, `promote.py` — **deferred to T-25+**.
+>   No backtest writer exists yet, so the experiment ledger has no writer. T-24 only
+>   seeds the params placeholder; the promotion script arrives with the backtest engine.
 
 **The "model" here is a tiny counted-parameter set, not a trained network.** Strategy 3
 calibrates ~2–3 parameters (`formation_horizon`, `vol_target`, weighting scheme) over a

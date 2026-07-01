@@ -84,10 +84,10 @@ seed — lives in `sql/DDL.sql` (PK/FK constraints are `NOT ENFORCED`).
 | Dataset                  | Layer    | Purpose                                                                 |
 |--------------------------|----------|-------------------------------------------------------------------------|
 | `prod_trade_control`     | Control  | Source registry and consolidation priority.                             |
-| `prod_trade_strategy`    | Strategy | Strategy catalog + versioned params (`strategy_rsi_daily_week`, seed `14/40/70/30/70`). |
+| `prod_trade_strategy`    | Strategy | Strategy catalog + versioned params: `strategy_rsi_daily_week` (RSI, seed `14/40/70/30/70`) + `strategy_tsmom_multiasset` (TSMOM, seeded param_version=1). |
 | `prod_trade_bronze`      | Bronze   | Raw landing — one table per source, as delivered.                       |
 | `prod_trade_silver`      | Silver   | Conformed multi-asset OHLCV (`ohlcv_validated`) + RSI features (`rsi_features`) + weekly returns/excess/vol view (`vw_asset_returns_weekly`). |
-| `prod_trade_gold`        | Gold     | Signals fact (`fact_signals`) + training/monitoring views.              |
+| `prod_trade_gold`        | Gold     | Signals fact (`fact_signals`, strategy_id=1 RSI + strategy_id=3 TSMOM) + portfolio weights (`fact_portfolio_weights`) + training/monitoring views. |
 
 **Bronze.** The **candle** tables feed `conform` (deduped per `(symbol, date)`, highest
 `priority` wins): BTC spot — `binance_btcusd_daily_raw` (2017→, priority 3) and
@@ -113,12 +113,14 @@ state for `1d`/`1w` (idempotent incremental updates, reusable across strategies)
 `vw_asset_returns_weekly` = the Strategy-3 TSMOM feature layer: per-symbol weekly returns,
 excess returns vs the FRED DFF risk-free (point-in-time) and realized vol (×√52).
 
-**Gold.** `fact_signals` is the star-schema fact (one row per
-`symbol/temporality/signal_start/strategy_id`). Two **training views** line up close +
-RSI + MVRV + macro/on-chain features, all **point-in-time (as-of)** so there is no
-look-ahead (M2 uses its ALFRED vintage; MVRV shifted +1 day): `vw_btc_training_daily`
-(stationary features) and `vw_btc_training_weekly` (as-of Sunday); `vw_btc_monitor_daily`
-exposes raw comparable levels for a Looker Studio QA dashboard.
+**Gold.** `fact_signals` (one row per `symbol/temporality/signal_start/strategy_id`) is
+shared by strategy_id=1 (RSI) and strategy_id=3 (TSMOM); MERGE is upsert-only so each
+strategy's stage runs without touching the other's rows. `fact_portfolio_weights` (T-24)
+stores the Strategy-3 weekly weight books keyed by
+`(week_start, strategy_id, symbol, include_crypto)`. Two **training views** line up
+close + RSI + MVRV + macro/on-chain features, all **point-in-time (as-of)**:
+`vw_btc_training_daily` (stationary features) and `vw_btc_training_weekly`
+(as-of Sunday); `vw_btc_monitor_daily` exposes raw levels for Looker Studio.
 
 ---
 
@@ -138,8 +140,10 @@ only) and shares family logic in a `*_common.py` module.
 │   ├── pipeline_launch.py           # Airflow-free DAG helpers (testable in CI)
 │   └── ingest/                      # CCXT / API → bronze (thin entry-points + *_common)
 ├── dataflow/                        # Beam pipeline (SHIPPED to GCP)
-│   ├── pipeline.py · cleanup.py     # entry point + silver/gold cleanup
-│   └── stages/                      # conform.py · rsi.py · signals.py
+│   ├── pipeline.py · cleanup.py     # entry point (Strategy 1 RSI) + silver/gold cleanup
+│   ├── strategy3_pipeline.py        # Strategy 3 TSMOM entry point (sequential: Stage A → B)
+│   ├── strategy/                    # pure, GCP-free strategy logic (T-22/T-23)
+│   └── stages/                      # conform.py · rsi.py · signals.py · tsmom_signal_stage.py · portfolio_weights_stage.py
 ├── sql/DDL.sql                      # full medallion DDL + seeds
 ├── tests/                           # pytest unit suite + SQL contracts + opt-in integration
 ├── pyproject.toml · terraform_infra/ · .github/workflows/ci.yml
@@ -231,6 +235,7 @@ full analysis is [`strategy_3_analysis.md`](ml_strategy_docs/strategy_3_analysis
 | [Instrument universe](ml_strategy_docs/strategy_3_analysis.md#instrument-universe) | T-19 | ✅ |
 | [TSMOM signal](ml_strategy_docs/strategy_3_analysis.md#tsmom-signal) | T-22 | ✅ |
 | [Portfolio construction](ml_strategy_docs/strategy_3_analysis.md#portfolio-construction) | T-23 | ✅ |
+| [Modeling lifecycle & gold materialisation](ml_strategy_docs/strategy_3_analysis.md#modeling-lifecycle--tooling) | T-24 | ✅ |
 | [Validation methodology](ml_strategy_docs/strategy_3_analysis.md#validation-methodology) | Epic 8 | ✍️ |
 | [Baselines](ml_strategy_docs/strategy_3_analysis.md#baselines) | T-26 | ⏳ |
 | [Verdict](ml_strategy_docs/strategy_3_analysis.md#verdict) | T-27/28 | ⏳ |

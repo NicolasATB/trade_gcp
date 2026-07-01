@@ -20,7 +20,13 @@ from datetime import date
 
 import pytest
 
-from dataflow.stages import conform, rsi, signals
+from dataflow.stages import (
+    conform,
+    portfolio_weights_stage,
+    rsi,
+    signals,
+    tsmom_signal_stage,
+)
 
 
 def _norm(sql: str) -> str:
@@ -77,6 +83,12 @@ _MERGE_CONTRACTS = [
      ["symbol", "temporality", "rsi_period", "time_period_start"]),
     ("signals MERGE", signals._MERGE_SQL,
      ["symbol", "temporality", "signal_start", "strategy_id"]),
+    # T-24: strategy_id=3 gold stages (upsert-only; strategy_id in ON clause
+    # is the structural guard that prevents cross-strategy MERGE collisions).
+    ("tsmom signal MERGE", tsmom_signal_stage._MERGE_SQL,
+     ["symbol", "temporality", "signal_start", "strategy_id"]),
+    ("portfolio weights MERGE", portfolio_weights_stage._MERGE_SQL,
+     ["week_start", "strategy_id", "symbol", "include_crypto"]),
 ]
 
 _ALL_SQL_TEMPLATES = [(name, sql) for name, sql, _ in _MERGE_CONTRACTS]
@@ -139,6 +151,24 @@ class TestSignalsReadFilters:
         # walk-forward (float(None)) or emit bogus signals.
         assert "rsi IS NOT NULL" in signals._READ_WEEKLY_RSI
         assert "rsi IS NOT NULL" in signals._READ_DAILY_RSI
+
+
+class TestNoDeleteBySource:
+    """Guard that no MERGE has a WHEN NOT MATCHED BY SOURCE branch.
+
+    Such a branch would delete rows in the target that are absent from the
+    current staging run — for a shared table like fact_signals (strategy_id=1
+    RSI + strategy_id=3 TSMOM), that would silently wipe the other strategy's
+    rows whenever one strategy is re-run alone.
+    """
+
+    @pytest.mark.parametrize("name, sql, _", _MERGE_CONTRACTS,
+                             ids=[c[0] for c in _MERGE_CONTRACTS])
+    def test_no_when_not_matched_by_source(self, name, sql, _):
+        assert "NOT MATCHED BY SOURCE" not in sql, (
+            f"{name}: WHEN NOT MATCHED BY SOURCE found — would delete rows "
+            "absent from the staging run (unsafe for cross-strategy tables)"
+        )
 
 
 class TestMergeNaturalKeys:
