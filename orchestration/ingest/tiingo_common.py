@@ -70,9 +70,14 @@ def _parse_float(value) -> float | None:
 def parse_prices(payload: list) -> list[dict]:
     """Parse a Tiingo EOD JSON array into raw OHLC records.
 
-    Returns one ``{"date", "open", "high", "low", "close", "volume"}`` per bar,
-    ascending by date; ``date`` is the calendar date of the ISO timestamp Tiingo
-    returns. Bars with a missing close are skipped (bronze holds only real bars).
+    Returns one ``{"date", "open", "high", "low", "close", "volume",
+    "split_factor", "div_cash"}`` per bar, ascending by date; ``date`` is the
+    calendar date of the ISO timestamp Tiingo returns. Bars with a missing close
+    are skipped (bronze holds only real bars). ``split_factor`` (Tiingo's
+    ``splitFactor``; 1.0 = no split) and ``div_cash`` (``divCash``; 0 = no
+    dividend) are kept **raw, as delivered** — bronze stores them untouched; the
+    silver consolidation reconstructs the split-only-adjusted close from
+    ``split_factor`` so Tiingo lines up with Yahoo's split-adjusted basis (T-21).
     Raises ``ValueError`` if Tiingo returned an error object instead of an array
     (e.g. ``{"detail": "Not found"}`` for an unknown ticker).
     """
@@ -91,6 +96,8 @@ def parse_prices(payload: list) -> list[dict]:
                 "low": _parse_float(bar.get("low")),
                 "close": close,
                 "volume": _parse_float(bar.get("volume")),
+                "split_factor": _parse_float(bar.get("splitFactor")),
+                "div_cash": _parse_float(bar.get("divCash")),
             }
         )
     records.sort(key=lambda r: r["date"])
