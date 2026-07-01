@@ -1330,3 +1330,39 @@ LEFT JOIN `trade-390514.prod_trade_bronze.coinmetrics_btc_active_addresses_daily
   ON a.metric_date = d.date
 LEFT JOIN `trade-390514.prod_trade_bronze.coinmetrics_btc_tx_count_daily_raw` AS t
   ON t.metric_date = d.date;
+
+
+-- ---------------------------------------------------------------------
+-- prod_trade_strategy — backtest trial ledger (T-25)
+-- One row per backtest trial (parameter combination) run through the
+-- engine in research/run_experiments.py (T-26).
+-- Schema mirrors WalkForwardStats so the Python dataclass and the BQ
+-- table stay in sync without a separate mapping layer.
+-- Writer: research/run_experiments.py, deferred to T-26.  No T-25 code
+-- reads or writes this table; the DDL lands here (T-25) because the
+-- schema is derived from WalkForwardStats and the engine that produces
+-- those stats is also T-25 — schema and producer are coherent.
+-- This does not violate the "no schema without a writer" principle:
+-- T-26 is the immediately next ticket, not a diffuse future task.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.experiment_runs` (
+  experiment_run_id     STRING    NOT NULL OPTIONS(description = "UUID for this trial run."),
+  created_at            TIMESTAMP NOT NULL OPTIONS(description = "When the trial was executed."),
+  tsmom_params_json     STRING    OPTIONS(description = "JSON-serialised TsmomParams (incl. vol_scaling flag)."),
+  portfolio_params_json STRING    OPTIONS(description = "JSON-serialised PortfolioParams (scheme + crypto_cap)."),
+  cost_multiplier       FLOAT64   OPTIONS(description = "Sensitivity grid value used (1.0 / 1.5 / 2.0)."),
+  n_cv_folds            INT64     OPTIONS(description = "Number of walk-forward folds."),
+  cv_sharpe_net         FLOAT64   OPTIONS(description = "Mean per-fold net Sharpe across all CV folds."),
+  cv_sortino_net        FLOAT64   OPTIONS(description = "Mean per-fold net Sortino across all CV folds."),
+  cv_max_dd             FLOAT64   OPTIONS(description = "Mean per-fold maximum drawdown (≤ 0) across all CV folds."),
+  cv_calmar             FLOAT64   OPTIONS(description = "Mean per-fold Calmar ratio across all CV folds."),
+  dsr                   FLOAT64   OPTIONS(description = "Deflated Sharpe Ratio (Bailey & López de Prado 2014) over all trial Sharpes at time of evaluation."),
+  pbo                   FLOAT64   OPTIONS(description = "Probability of Backtest Overfitting (CSCV, López de Prado 2018) ∈ [0, 1]."),
+  hlz_tstat             FLOAT64   OPTIONS(description = "Harvey-Liu-Zhu (2016) t-stat after multiple-testing haircut."),
+  n_trials_at_time      INT64     OPTIONS(description = "Number of trials evaluated when DSR was computed (for audit trail)."),
+  holdout_spent         BOOL      OPTIONS(description = "TRUE only when T-27 opens the holdout for this run."),
+  holdout_sharpe_net    FLOAT64   OPTIONS(description = "Net Sharpe over the holdout window (NULL until T-27 fills it; never NULL after T-27)."),
+  promoted              BOOL      OPTIONS(description = "TRUE when this trial's params were promoted to the active strategy_tsmom_multiasset row."),
+  PRIMARY KEY (experiment_run_id) NOT ENFORCED
+)
+OPTIONS(description = "Strategy 3 backtest trial ledger: one row per parameter-combination trial (Epic 8 T-25/T-26/T-27). Writer: research/run_experiments.py (T-26).");

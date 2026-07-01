@@ -65,6 +65,12 @@ class TsmomParams:
         max_leverage: Optional cap on the absolute vol-scaling factor, so a
             collapsing ``realized_vol`` cannot demand unbounded leverage. ``None``
             leaves the factor uncapped.
+        vol_scaling: When ``False`` the position equals the unscaled signal
+            (``float(sign)``), bypassing :func:`vol_scale` entirely. Use
+            ``False`` + ``scheme=equal_weight`` together to isolate the Kim et al.
+            (2016) confound: vol scaling does most of the performance work, so
+            reporting with and without is a validation requirement (principle 2).
+            This is a backtest/validation flag; production always scales (True).
     """
 
     formation_horizon: int
@@ -72,6 +78,7 @@ class TsmomParams:
     vol_lookback: int
     periods_per_year: int = 52
     max_leverage: float | None = None
+    vol_scaling: bool = True
 
     def __post_init__(self) -> None:
         if self.formation_horizon < 1:
@@ -231,13 +238,19 @@ def compute_tsmom_rows(
         )
         sign = tsmom_sign(formation, eps=eps)
         scale = vol_scale(row.get(vol_key), params)
+        if params.vol_scaling:
+            position = tsmom_position(sign, scale)
+        else:
+            # vol_scaling=False: position = unscaled sign (±1/0/None).
+            # Use with scheme=equal_weight to isolate the Kim et al. confound.
+            position = None if sign is None else float(sign)
         out.append(
             {
                 "time_period_start": row[time_key],
                 "formation_return": formation,
                 "signal": sign,
-                "vol_scale": scale,
-                "position": tsmom_position(sign, scale),
+                "vol_scale": scale if params.vol_scaling else None,
+                "position": position,
             }
         )
     return out
