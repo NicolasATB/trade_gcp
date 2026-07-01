@@ -31,6 +31,7 @@ addopts = [
     "-q",
     "--strict-markers",
     "--cov=dataflow",
+    "--cov=backtest",
     "--cov-branch",
     "--cov-report=term-missing",
     "--cov-fail-under=85",
@@ -56,7 +57,7 @@ filterwarnings = [
 
 [tool.coverage.run]
 branch = true
-source = ["dataflow"]
+source = ["dataflow", "backtest"]
 # pipeline.py is the CLI/Beam orchestration entry point: pure glue that wires the
 # three stages and can only run against live GCP, so it is excluded from the
 # unit-test coverage target (covered by the manual end-to-end run in T-08).

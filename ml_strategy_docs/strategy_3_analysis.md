@@ -13,7 +13,7 @@
 | [Instrument universe](#instrument-universe) | T-19 | ✅ done |
 | [TSMOM signal](#tsmom-signal) | T-22 | ✅ done |
 | [Portfolio construction](#portfolio-construction) | T-23 | ✅ done |
-| [Modeling lifecycle & tooling](#modeling-lifecycle--tooling) | T-24/T-25 | ✅ T-24 / ⏳ T-25 |
+| [Modeling lifecycle & tooling](#modeling-lifecycle--tooling) | T-24/T-25 | ✅ T-24 / ✅ T-25 |
 | [Validation methodology](#validation-methodology) | Epic 8 | ✍️ drafted |
 | [Baselines](#baselines) | T-26 | ⏳ pending |
 | [Verdict](#verdict) | T-27/28 | ⏳ pending |
@@ -260,9 +260,11 @@ position) until a usable estimate exists; a flat (`0`) signal needs no sizing.
 
 **Parameters (`TsmomParams`).** `formation_horizon`, `vol_target` and
 `vol_lookback` are required; `periods_per_year` defaults to 52 (weekly cadence);
-`max_leverage` is an optional cap. Both `formation_horizon` and `vol_target` are
-**trials counted** against the budget — persisting them as a versioned strategy
-row is T-24.
+`max_leverage` is an optional cap; `vol_scaling: bool = True` (added in T-25)
+bypasses the scaling factor when `False`, producing ±1/0 positions for the Kim et
+al. (2016) confound isolation — always `True` in production. Both `formation_horizon`
+and `vol_target` are **trials counted** against the budget — persisting them as a
+versioned strategy row is T-24.
 
 ---
 
@@ -331,9 +333,15 @@ T-21 view), not two silently-different ones.
 
 ## Modeling lifecycle & tooling
 
-> Status: **T-24 done / T-25 pending.** T-24 wired the pure T-22/T-23 functions into
-> two Beam stages and created the versioned parameter table; T-25 (backtest engine +
-> experiment ledger + promotion script) remains. The daily pipeline is unaffected.
+> Status: **T-24 done / T-25 done.** T-24 wired the pure T-22/T-23 functions into two
+> Beam stages and created the versioned parameter table; T-25 built the offline backtest
+> engine, cost model, walk-forward splitter, and overfit-detection metrics. T-26
+> (experiment grid runner, `experiment_runs` writer) is next.
+>
+> **T-22 minor reopen (T-25 scope):** `vol_scaling: bool = True` added to `TsmomParams`.
+> When `False`, the per-instrument position equals the unscaled signal sign (±1/0) — used
+> with `scheme=equal_weight` for the Kim et al. (2016) no-vol-scaling baseline. Production
+> always uses `vol_scaling=True`; the flag has no effect on T-24 BigQuery output.
 >
 > **T-24 deliverables:**
 > - `dataflow/stages/tsmom_signal_stage.py` — Stage A: silver `vw_asset_returns_weekly`
@@ -352,9 +360,44 @@ T-21 view), not two silently-different ones.
 >   `UPDATE strategy_tsmom_multiasset SET is_active=(param_version=@v) WHERE TRUE;`
 > - `prod_trade_gold.fact_portfolio_weights` — new gold table; natural key
 >   `(week_start, strategy_id, symbol, include_crypto)`.
-> - `experiment_runs`, `research/run_experiments.py`, `promote.py` — **deferred to T-25+**.
->   No backtest writer exists yet, so the experiment ledger has no writer. T-24 only
->   seeds the params placeholder; the promotion script arrives with the backtest engine.
+> - `experiment_runs` DDL — **deferred writer** to T-26; DDL added in T-25 (schema mirrors
+>   `WalkForwardStats`, coherent with the engine that produces it). `research/run_experiments.py`
+>   and `promote.py` arrive with T-26.
+>
+> **T-25 deliverables (offline backtest engine — never imported by the daily pipeline):**
+> - `backtest/costs.py` — `InstrumentClass` enum, `SYMBOL_CLASS` (explicit symbol→class dict;
+>   "BTCUSD" not "BTC" — matching `vw_asset_returns_weekly`), `ROUND_TRIP_BPS`
+>   (EQUITY=8, BOND=8, COMMODITY=12, FX=10, CRYPTO=80 bps), `ROLL_COST_BPS_PA` (all 0 by
+>   default; DBC roll is in its NAV — adding it here would double-count), `transaction_cost_return`
+>   and `roll_cost_return` (sensitivity hook only). Cost basis for 80 bps BTCUSD documented
+>   (retail spread + exchange fee + slippage).
+> - `backtest/splitter.py` — `HOLDOUT_START = date(2021, 1, 4)` (theory-driven, sealed as a
+>   constant; Molenaar et al. 2024 stock-bond correlation flip), `WalkForwardConfig`
+>   (n_splits, min_train_weeks=104, purge_weeks=3, embargo_weeks=2, mode=expanding/rolling),
+>   `walk_forward_splits` (purge + embargo, raises `HoldoutViolationError` on holdout dates
+>   in input), `open_holdout` (validates ≥ 250 holdout obs; single-use by convention).
+> - `backtest/metrics.py` — `annualized_sharpe`, `annualized_sortino`, `max_drawdown`,
+>   `calmar_ratio`, `profit_factor` (period-level stats on the **simple** return series),
+>   `deflated_sharpe_ratio` (Bailey & López de Prado 2014; takes `sharpe_trials: list[float]`
+>   so n and Var(SR) are derived internally — the Var term is what the old n-only signature
+>   missed), `pbo_cscv` (CSCV, 20 blocks, PBO ∈ [0, 1]), `hlz_haircut` (Harvey-Liu-Zhu 2016),
+>   `WalkForwardStats`. No scipy dependency (pure-Python CDF/PPF via rational approximation).
+> - `backtest/engine.py` — `run_backtest`: reads `excess_return` (simple column from T-21)
+>   for cross-asset aggregation (log returns are NOT additive across assets); feeds
+>   `excess_log_return` to `compute_tsmom_rows` (additive per-asset); reuses
+>   `build_portfolio` from T-23; applies `cost_multiplier` grid {1.0, 1.5, 2.0} via
+>   `transaction_cost_return`. `BacktestResult` with gross/net returns, turnover,
+>   end-of-period weights, and `equity_curve()` helper.
+> - `prod_trade_strategy.experiment_runs` — trial ledger DDL added to `sql/DDL.sql`; writer
+>   is `research/run_experiments.py` (T-26). Schema: `experiment_run_id`, params JSON,
+>   `cost_multiplier`, fold stats (Sharpe/Sortino/MaxDD/Calmar), DSR, PBO, HLZ t-stat,
+>   `n_trials_at_time`, `holdout_spent`, `holdout_sharpe_net`, `promoted`.
+> - 88 unit tests across four files (`test_backtest_costs.py`, `test_backtest_engine.py`,
+>   `test_backtest_splitter.py`, `test_backtest_metrics.py`). Total suite: 672 tests, 91%
+>   coverage (gate ≥ 85%). Key tests: hand-verified cross-asset arithmetic (proves engine
+>   reads simple column, not log), DSR variance effect (proves `Var(sharpe_trials)` matters),
+>   universe coverage gate (asserts `SYMBOL_CLASS.keys() == EXPECTED_SYMBOLS` where
+>   `EXPECTED_SYMBOLS` came from `SELECT DISTINCT symbol FROM vw_asset_returns_weekly`).
 
 **The "model" here is a tiny counted-parameter set, not a trained network.** Strategy 3
 calibrates ~2–3 parameters (`formation_horizon`, `vol_target`, weighting scheme) over a
