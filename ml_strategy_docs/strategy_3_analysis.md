@@ -11,6 +11,9 @@
 | [Research thesis](#research-thesis) | arc | ✅ written |
 | [Data sources per class](#data-sources-per-class) | T-18 | ✅ done |
 | [Instrument universe](#instrument-universe) | T-19 | ✅ done |
+| [TSMOM signal](#tsmom-signal) | T-22 | ✅ done |
+| [Portfolio construction](#portfolio-construction) | T-23 | ✅ done |
+| [Modeling lifecycle & tooling](#modeling-lifecycle--tooling) | T-24/25 | 🗺️ planned |
 | [Validation methodology](#validation-methodology) | Epic 8 | ✍️ drafted |
 | [Baselines](#baselines) | T-26 | ⏳ pending |
 | [Verdict](#verdict) | T-27/28 | ⏳ pending |
@@ -216,6 +219,168 @@ hygiene.
 **Exit gate (honest):** coverage proved sufficient for a walk-forward with a post-2020
 holdout, so the universe is frozen at nine. Had it been insufficient, the universe would
 be documented and narrowed and that limitation reported.
+
+---
+
+## TSMOM signal
+
+> Status: **done (T-22).** Pure, GCP-free signal logic in
+> [`../dataflow/strategy/tsmom_signal.py`](../dataflow/strategy/tsmom_signal.py),
+> unit-tested in `tests/test_tsmom_signal.py`. The gold materialisation and the
+> versioned parameter row are a separate ticket (T-24); the backtest engine
+> (T-25) reuses the same functions.
+
+**Signal = sign of the cumulative excess return over a formation horizon.** For
+instrument *i* at rebalance week *t*, sum the trailing `formation_horizon` weekly
+**excess log returns** (additive, so the cumulative is a plain sum) and take its
+sign: `+1` long, `−1` short, `0` flat. The horizon `L ∈ {1, 3, 6, 12}` months is a
+**counted trial**, calibrated within the trial budget (Epic 8), never hardcoded.
+
+**Volatility scaling is a separate, counted factor — never hidden in the signal.**
+The position is `signal × (vol_target / realized_vol)`, where `vol_target` is an
+explicit, *required* parameter (no magic default) and `realized_vol` is the
+ex-ante annualised volatility from silver. Keeping the **unscaled signal** and the
+**scaled position** as distinct outputs is what lets Epic 8 report performance
+*with and without* vol scaling (methodology principle 2 below). An optional
+leverage cap bounds the factor so a collapsing volatility cannot demand unbounded
+size.
+
+**Input contract (point-in-time, from T-21).** The feature layer is
+`prod_trade_silver.vw_asset_returns_weekly`: the signal reads `excess_log_return`
+and `realized_vol_26w` keyed by `week_start`. No look-ahead is introduced here —
+the formation sum uses only the trailing window and the volatility is the estimate
+known at *t*; the cross-asset/PIT hygiene that needs market or risk-free data lives
+in the view (DFF point-in-time, Monday→Sunday weeks).
+
+**NULL contract (mirrors the RSI warm-up).** The first `formation_horizon − 1`
+weeks have no full formation window → no signal. The volatility's own 26-week
+warm-up arrives as `NULL`, leaving a directional signal **unsized** (`NULL`
+position) until a usable estimate exists; a flat (`0`) signal needs no sizing.
+
+**Parameters (`TsmomParams`).** `formation_horizon`, `vol_target` and
+`vol_lookback` are required; `periods_per_year` defaults to 52 (weekly cadence);
+`max_leverage` is an optional cap. Both `formation_horizon` and `vol_target` are
+**trials counted** against the budget — persisting them as a versioned strategy
+row is T-24.
+
+---
+
+## Portfolio construction
+
+> Status: **done (T-23).** Pure, GCP-free cross-sectional logic in
+> [`../dataflow/strategy/portfolio.py`](../dataflow/strategy/portfolio.py),
+> unit-tested in `tests/test_portfolio.py`. The gold materialisation and the
+> versioned parameter row are a separate ticket (T-24); the backtest engine (T-25)
+> reuses these functions.
+
+**From per-instrument positions to one weight book per week.** T-22 emits, per
+instrument and rebalance week, a sign and a vol-scaled position. T-23 combines that
+**cross-section** into portfolio weights under a named scheme, caps the crypto
+sleeve, and produces both a **with-crypto** and a **without-crypto** book (two
+separate portfolios, the diversification experiment vs the core).
+
+**Three weighting schemes (plus a distinct baseline).**
+
+- **`equal_weight`** — `wᵢ = sᵢ / N_active`: equal capital per active leg.
+- **`inverse_vol`** (alias **`equal_vol`**) — `wᵢ ∝ sᵢ / σᵢ`: lower-vol legs get more
+  weight so each contributes equal volatility under zero correlation.
+- **`risk_parity`** — equal risk contribution. **v1 is diagonal** (zero
+  cross-correlation assumed), which collapses to inverse-vol in closed form; the
+  full-covariance ERC solver (rolling covariance + shrinkage, capturing cross-asset
+  correlation) is **deferred to a later ticket** and plugs into a reserved `cov`
+  hook whose shape is already fixed.
+
+**Honest v1 coincidence.** Under the v1 conventions (per-asset vol scaling from
+T-22 + diagonal covariance + gross-1 normalisation), **`equal_vol`, `inverse_vol`
+and diagonal `risk_parity` yield identical normalised weights**. They keep distinct
+labels (clean trial counting for Epic 8 and a clean ERC swap later) but the
+coincidence is documented, not hidden — they diverge only once full-covariance ERC
+or a different normalisation lands. `equal_weight` is the genuinely *distinct*
+alternative the validation compares against, so the three named schemes do not
+inflate the trial budget with identical trials. The identity is pinned by a
+**value-based** test (heterogeneous per-instrument vols), so a future ERC change is
+caught rather than passing silently.
+
+**Normalisation = gross leverage 1.** Weights are normalised to `Σ|wᵢ| = 1`
+(dividing by gross `Σ|w|`, never net `|Σw|`, so a market-neutral book is valid:
+gross 1, net 0). The absolute vol-target level stays in T-22's per-instrument
+scaling, so performance is still reportable **with and without vol scaling**.
+
+**Crypto cap (a counted trial) and its deliberate coupling.** After
+normalisation, each crypto leg above the cap is clipped to `±cap` and the freed
+gross redistributed **pro rata** across the non-crypto legs. With a single capped
+sleeve this is **one-shot** (no iteration); adding a second cap (e.g. per class)
+would break that and need a water-filling solve — flagged so it is not silently
+relied on. Unlike T-22's per-instrument vol scaling, which *isolates* each leg, the
+cap is a **portfolio-layer constraint that intentionally couples** instruments:
+each non-crypto leg's exposure depends on how much crypto was clipped that week.
+This is stated as a deliberate v1 choice, not an oversight. **Edge — only the
+crypto sleeve trades that week:** the book is left **gross-partial** (`gross =
+cap`), honouring the **cap** (the real risk constraint) over the gross-1 invariant
+— the sleeve is a documented diversification leg, never held at 100% just because
+it is the only thing trading.
+
+**Vol estimator shared with T-22 (confirmed).** The weighting reads the same
+`realized_vol_26w` column T-22 scales positions with, so the per-instrument scaling
+and the portfolio weighting use *one* vol estimator (26-week realised vol from the
+T-21 view), not two silently-different ones.
+
+---
+
+## Modeling lifecycle & tooling
+
+> Status: **planned.** The offline apparatus that turns the pure signal/portfolio logic
+> into a calibrated, promoted strategy. Spans T-24 (promotion target) and T-25 (engine);
+> the daily pipeline is unaffected.
+
+**The "model" here is a tiny counted-parameter set, not a trained network.** Strategy 3
+calibrates ~2–3 parameters (`formation_horizon`, `vol_target`, weighting scheme) over a
+budget of 10–15 trials (validation principle 7). That right-sizes the tooling: heavy MLOps
+(model registry, serving, Bayesian HPO, a feature store) would be over-engineering and works
+*against* the project's right-sizing narrative.
+
+**BigQuery is already the model registry.** The production artifact is a *versioned parameter
+row* in `prod_trade_strategy` (`strategy_tsmom_multiasset`, T-24), read by the daily job —
+the same "train offline, serve frozen params from BigQuery" pattern the RSI strategy uses. No
+MLflow Model Registry / serving: a single param row needs no serialisation, and a second
+registry would be redundant.
+
+| Lifecycle stage | Tool | Rationale / caveat |
+|---|---|---|
+| Parameter search | Explicit grid (nested loop over `TsmomParams`) | 10–15 trials → enumerate, don't sample. **No Optuna**: Bayesian search hides the trial count the DSR needs (the ML skill is vendored without it for the same reason). |
+| Experiment tracking | **A BigQuery `experiment_runs` table** (one row per trial) | Principle 7 requires counting every trial and computing DSR over all of them — the table *is* that trial ledger, and it reuses the warehouse that is already the registry (no MLflow server, no `mlruns/` store, one dependency fewer). Log params and metrics (Sharpe, DSR, PBO, t-stat, per-window DD); heavy artifacts (equity-curve PNGs) go to GCS keyed by `experiment_run_id`. |
+| Backtest engine | Own pure-Python code (`backtest/`, T-25) | Reuses `dataflow/strategy/tsmom_signal.py` + `portfolio.py` (kept GCP-free for this). |
+| Performance metrics | `portfolio-analytics` skill | Sharpe/Sortino/Calmar/profit factor/max DD/rolling — not re-implemented by hand. |
+| Temporal validation | `walk-forward-validation` skill | Purge+embargo, CSCV→PBO, DSR, overfit detection (López de Prado) = validation principles 4/7. |
+| Promotion to prod | Script → BigQuery param row | Pick the winning run **only after the single holdout** (principle 6), then write the versioned param row, storing its **`experiment_run_id`** (FK into `experiment_runs`) for lineage. One-directional. |
+| Live evaluation | `vw_btc_monitor_daily` + Looker Studio (existing) | Live strategy-P&L tracking is a later concern, not v1. |
+
+**Target repo layout (offline vs online boundary).**
+
+```
+trade_gcp/
+  dataflow/strategy/   # pure signal + portfolio (T-22/23) — reused by prod AND backtest
+  backtest/            # T-25 offline engine: WF splits, costs, DSR/PBO (pure logic + thin runners)
+  research/            # experiment driver — NEVER imported by the daily pipeline
+    run_experiments.py #   grid over the TsmomParams budget → writes the experiment_runs table
+    promote.py         #   read the chosen run → write the versioned param row
+  sql/DDL.sql          # + experiment_runs ledger + versioned params table for strategy_id=3
+  orchestration/       # daily prod — only READS the param row (unchanged)
+```
+
+**Offline/online boundary (the "separate training from inference" rule).** Everything under
+`research/` and `backtest/` is offline; the daily Airflow/Dataflow job never imports the
+backtest engine — it only reads the frozen param row from BigQuery. This is the same boundary
+that keeps the RSI genetic algorithm out of the daily job.
+
+**Deliberately not adopted (right-sizing).** **MLflow in any form — registry, serving *and*
+Tracking:** BigQuery is already both the registry and (via `experiment_runs`) the trial ledger,
+so an MLflow server / `mlruns/` store would add a dependency and a second source of truth for no
+gain at 10–15 trials. Optuna / Ray Tune (that trial budget doesn't justify a sampler, and
+enumeration is the point); a feature store (silver/gold views are already the versioned,
+point-in-time feature layer). Only if a real ML signal *classifier* is ever revisited (not the
+current path) would MLflow Tracking, the `signal-classification` + `machine-learning-engineering`
+skills and a real model registry genuinely earn their place.
 
 ---
 

@@ -229,6 +229,8 @@ full analysis is [`strategy_3_analysis.md`](ml_strategy_docs/strategy_3_analysis
 | [Research thesis](ml_strategy_docs/strategy_3_analysis.md#research-thesis) | arc | ✅ |
 | [Data sources per class](ml_strategy_docs/strategy_3_analysis.md#data-sources-per-class) | T-18 | ✅ |
 | [Instrument universe](ml_strategy_docs/strategy_3_analysis.md#instrument-universe) | T-19 | ✅ |
+| [TSMOM signal](ml_strategy_docs/strategy_3_analysis.md#tsmom-signal) | T-22 | ✅ |
+| [Portfolio construction](ml_strategy_docs/strategy_3_analysis.md#portfolio-construction) | T-23 | ✅ |
 | [Validation methodology](ml_strategy_docs/strategy_3_analysis.md#validation-methodology) | Epic 8 | ✍️ |
 | [Baselines](ml_strategy_docs/strategy_3_analysis.md#baselines) | T-26 | ⏳ |
 | [Verdict](ml_strategy_docs/strategy_3_analysis.md#verdict) | T-27/28 | ⏳ |
