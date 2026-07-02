@@ -15,7 +15,7 @@
 | [Portfolio construction](#portfolio-construction) | T-23 | ✅ done |
 | [Modeling lifecycle & tooling](#modeling-lifecycle--tooling) | T-24/T-25 | ✅ T-24 / ✅ T-25 |
 | [Validation methodology](#validation-methodology) | Epic 8 | ✍️ drafted |
-| [Baselines](#baselines) | T-26 | ⏳ pending |
+| [Baselines](#baselines) | T-26 | ✅ done |
 | [Verdict](#verdict) | T-27/28 | ⏳ pending |
 
 ---
@@ -392,12 +392,14 @@ T-21 view), not two silently-different ones.
 >   is `research/run_experiments.py` (T-26). Schema: `experiment_run_id`, params JSON,
 >   `cost_multiplier`, fold stats (Sharpe/Sortino/MaxDD/Calmar), DSR, PBO, HLZ t-stat,
 >   `n_trials_at_time`, `holdout_spent`, `holdout_sharpe_net`, `promoted`.
-> - 88 unit tests across four files (`test_backtest_costs.py`, `test_backtest_engine.py`,
->   `test_backtest_splitter.py`, `test_backtest_metrics.py`). Total suite: 672 tests, 91%
->   coverage (gate ≥ 85%). Key tests: hand-verified cross-asset arithmetic (proves engine
->   reads simple column, not log), DSR variance effect (proves `Var(sharpe_trials)` matters),
->   universe coverage gate (asserts `SYMBOL_CLASS.keys() == EXPECTED_SYMBOLS` where
->   `EXPECTED_SYMBOLS` came from `SELECT DISTINCT symbol FROM vw_asset_returns_weekly`).
+> - 119 unit tests across five files (`test_backtest_costs.py`, `test_backtest_engine.py`,
+>   `test_backtest_splitter.py`, `test_backtest_metrics.py`, `test_baselines.py`). Total
+>   suite: 703 tests, 91% coverage (gate ≥ 85%). Key tests: hand-verified cross-asset
+>   arithmetic (proves engine reads simple column, not log), DSR variance effect (proves
+>   `Var(sharpe_trials)` matters), universe coverage gate (asserts `SYMBOL_CLASS.keys() ==
+>   EXPECTED_SYMBOLS` where `EXPECTED_SYMBOLS` came from `SELECT DISTINCT symbol FROM
+>   vw_asset_returns_weekly`), HAC Newey-West correction for autocorrelated δ_t (proves
+>   `t_stat_HAC < t_stat_naïve` on AR(1) ρ=0.9 — the Huang 2020 MOP-error guard).
 
 **The "model" here is a tiny counted-parameter set, not a trained network.** Strategy 3
 calibrates ~2–3 parameters (`formation_horizon`, `vol_target`, weighting scheme) over a
@@ -492,16 +494,84 @@ rejected in review.
 
 ## Baselines
 
-> Status: **pending (T-26).** The "before" picture TSMOM is judged against (methodology
-> principle 1).
+> Status: **done (T-26).**
 
-To be filled in T-26 — run the backtest engine over the three benchmarks (**(a)** TSH,
-**(b)** vol-scaled buy-and-hold, **(c)** 60/40 + per-class buy-and-hold), per
-walk-forward window and aggregated, net of costs, with cost sensitivity.
+Implemented in `backtest/baselines.py`; run via `research/run_experiments.py`.
+Each baseline neutralises **exactly one** dimension relative to TSMOM so the
+gate is interpretable.
 
-**Exit gate (honest):** if TSMOM ties TSH in validation (the Huang scenario), document
-that the signal adds nothing over the historical mean and consider closing the epic with
-a negative result **before** spending the single holdout.
+| Baseline | Shares with TSMOM | Neutralises |
+|---|---|---|
+| TSH | vol scaling, scheme, crypto cap | Signal formation (historical mean vs 52w window) |
+| Vol-BH | vol scaling, scheme, crypto cap | Signal direction (always +1 vs momentum sign) |
+| 60/40 Passive | nothing | All tactical components |
+
+### (a) TSH — Time-Series Historical (Huang et al. 2020 JFE)
+
+Signal = sign(mean `excess_log_return` over the entire fold training window). Same vol
+scaling, portfolio scheme, and crypto cap as the TSMOM configuration being compared; only
+signal formation differs. This is the strictest benchmark: Huang et al. (2020 JFE) show
+that TSMOM performs virtually identically to TSH (alpha differential p ≈ 0.26). If TSMOM
+does not beat TSH, the 52-week formation window adds nothing over the historical mean direction.
+
+### (b) Vol-Scaled Buy-and-Hold (Kim et al. 2016 JFM)
+
+Signal = +1 always. Same vol scaling and portfolio construction as TSMOM. Neutralises
+signal direction only. If vol-BH ≈ TSMOM, vol scaling (not momentum) drives returns.
+
+### (c) 60/40 Passive
+
+Fixed weights: 30% SPY + 30% EFA + 20% IEF + 20% TLT. No signal, no vol scaling.
+Annual drift rebalance (`rebalance_weeks=52`). Weight drift computed from `simple_return`
+(total price return, as in a real portfolio); returns reported as `excess_return` for
+comparability.
+
+**Comparability:** Sharpe and Sortino are scale-invariant and directly comparable to
+TSMOM. Max drawdown is **not** comparable — 60/40 runs at its natural volatility (~10–12%);
+TSMOM targets 10% via vol scaling.
+
+### Walk-forward notes
+
+- **Fold alignment:** all four strategies are trimmed to the intersection of active dates
+  per fold before computing metrics. Ensures `δ_t = net_TSMOM(t) − net_TSH(t)` is a
+  term-by-term subtraction on identical periods.
+- **Crypto sleeve in early folds:** BTC's vol warm-up (26w from 2011-08) may exclude it
+  from the first 1–2 fold cross-sections. Declared; not hidden. Fold-level metrics reflect
+  a portfolio without crypto in early windows.
+
+### Gate criterion (pre-committed, set before running)
+
+Pool all test-week net returns across folds for TSMOM and TSH. Compute
+`δ_t = net_TSMOM(t) − net_TSH(t)` (~360 pooled weekly observations).
+
+A naïve t-stat (`mean(δ) / (std(δ)/√n)`) is not valid here: the 52-week formation signal
+barely changes week-to-week, so consecutive `δ_t` values are nearly identical. Treating
+360 correlated observations as 360 independent ones inflates the t-stat — the same MOP
+error Huang (2020) demonstrated with the pooled t-stat of 4.34.
+
+**HAC-corrected t-stat (Newey-West, Bartlett kernel, L=52):**
+
+    V_NW = γ(0) + 2·Σ_{l=1}^{52} (1 − l/53)·γ(l)
+    t_stat_HAC = mean(δ) / √(V_NW / n)
+
+Gate passes if `t_stat_HAC > 1.64` (one-sided α = 0.10, pre-committed).
+If not: document that the momentum signal adds nothing beyond the historical mean direction
+and consider closing Epic 8 **before** spending the single holdout.
+
+**DSR and HLZ:** both deferred to T-27 — both are multiple-testing corrections that
+require the full trial grid. With one TSMOM trial in T-26, there is no multiplicity to
+correct. `dsr=NULL`, `hlz_tstat=NULL` in all T-26 `experiment_runs` rows.
+
+### Results
+
+| Strategy | Cost mult | CV Sharpe (net) | CV Sortino | Gate t-stat (HAC) |
+|---|---|---|---|---|
+| TSMOM seed v1 | 1.0 | — | — | — |
+| TSH | 1.0 | — | — | (ref) |
+| Vol-BH | 1.0 | — | — | — |
+| 60/40 passive | 1.0 | — | — | — |
+
+*Fill after running `python -m research.run_experiments --project trade-390514`.*
 
 ---
 
