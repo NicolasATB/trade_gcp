@@ -149,6 +149,31 @@ class TestTshBaseline:
         for wts in result.weights:
             assert wts.get("SPY", 0.0) == 0.0
 
+    def test_sizing_uses_prior_week_vol(self):
+        """Each return week must be sized with vol(t-1), not vol(t) (look-ahead guard).
+
+        Relative vols swap between week 0 and week 1: SPY is the low-vol asset
+        at week 0 and the high-vol asset from week 1 on.  Sizing the week-1
+        return with week-0 vol (honest) gives SPY the larger inverse-vol
+        weight; sizing with week-1 vol (look-ahead) would give it the smaller.
+        """
+        dates = self._dates(4)
+        rows = {
+            "SPY": [_make_row(dates[0], 0.01, 0.02, vol=0.10)]
+            + [_make_row(d, 0.01, 0.02, vol=0.30) for d in dates[1:]],
+            "IEF": [_make_row(dates[0], 0.01, 0.02, vol=0.30)]
+            + [_make_row(d, 0.01, 0.02, vol=0.10) for d in dates[1:]],
+        }
+        result = run_tsh_baseline(
+            rows, dates[:1], dates[1:], PORT_INV_VOL, with_crypto=False
+        )
+
+        assert result.dates[0] == dates[1]
+        wts = result.weights[0]
+        assert wts["SPY"] > wts["IEF"], (
+            f"Week {dates[1]} sized with its own vol (look-ahead): {wts}"
+        )
+
     def test_no_signal_when_all_train_returns_zero(self):
         dates = self._dates(5)
         rows = {"SPY": [_make_row(d, excess_log=0.0, excess_simple=0.0) for d in dates]}
@@ -216,11 +241,12 @@ class TestVolBhBaseline:
         # All positive excess_log → TSMOM signal = +1 for all signal-eligible weeks.
         rows = {"SPY": [_make_row(d, excess_log=0.02, excess_simple=0.03) for d in dates]}
 
-        # Start from the first TSMOM signal date (formation_horizon - 1 = index 1)
-        # so both TSMOM and vol-BH enter from flat at the same week.
-        # Using dates[formation_horizon:] would skip the first signal week, which
-        # was already positioned in TSMOM — creating an asymmetric entry cost.
-        test_dates = dates[PARAMS_SHORT.formation_horizon - 1:]
+        # Start from TSMOM's first RETURN week: the first signal forms at index
+        # formation_horizon - 1 and its book earns the next week's return
+        # (w(t) × r(t+1)), so the first recorded week is dates[formation_horizon].
+        # Starting one week earlier would have vol-BH enter (and pay entry cost)
+        # before TSMOM — an asymmetric entry cost after alignment.
+        test_dates = dates[PARAMS_SHORT.formation_horizon:]
         r_tsmom = run_backtest(
             rows, PARAMS_SHORT, PORT_INV_VOL,
             with_crypto=False, cost_multiplier=1.0,
@@ -237,6 +263,28 @@ class TestVolBhBaseline:
         assert ra_tsmom.dates == ra_vbh.dates
         for nt, nv in zip(ra_tsmom.net_returns, ra_vbh.net_returns):
             assert abs(nt - nv) < 1e-9, f"TSMOM={nt:.6f} ≠ vol-BH={nv:.6f}"
+
+    def test_sizing_uses_prior_week_vol(self):
+        """Each return week must be sized with vol(t-1), not vol(t) (look-ahead guard).
+
+        Same construction as the TSH twin test: relative vols swap between
+        week 0 and week 1, so only prior-week sizing gives SPY the larger
+        inverse-vol weight at the first return week.
+        """
+        dates = self._dates(4)
+        rows = {
+            "SPY": [_make_row(dates[0], 0.01, 0.02, vol=0.10)]
+            + [_make_row(d, 0.01, 0.02, vol=0.30) for d in dates[1:]],
+            "IEF": [_make_row(dates[0], 0.01, 0.02, vol=0.30)]
+            + [_make_row(d, 0.01, 0.02, vol=0.10) for d in dates[1:]],
+        }
+        result = run_vol_bh_baseline(rows, dates[1:], PORT_INV_VOL, with_crypto=False)
+
+        assert result.dates[0] == dates[1]
+        wts = result.weights[0]
+        assert wts["SPY"] > wts["IEF"], (
+            f"Week {dates[1]} sized with its own vol (look-ahead): {wts}"
+        )
 
     def test_returns_backtest_result_instance(self):
         result = run_vol_bh_baseline({}, [], PORT_EW)

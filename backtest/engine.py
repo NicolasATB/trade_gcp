@@ -7,6 +7,14 @@ Beam gold stage (T-24).  The engine reuses the same signal and portfolio logic
 as production but computes equity curves from a passed-in row dict rather than a
 BigQuery query.
 
+Timing contract — w(t) × r(t+1), never w(t) × r(t):
+The signal for week t is formed from data through the Sunday that closes week t
+(``compute_tsmom_rows``'s formation window is inclusive of week t, and so is the
+``realized_vol_26w`` window in the T-21 view).  The book built from that signal
+is traded on the Monday that opens week t+1 and earns week t+1's return.
+``BacktestResult.dates`` therefore holds **return weeks**: the weights recorded
+at each date were formed from the prior week's information.
+
 Excess-return contract (resolved by T-21, documented here, not re-implemented):
 ``vw_asset_returns_weekly`` materialises two excess-return columns:
 
@@ -56,13 +64,15 @@ class BacktestResult:
     """Output of :func:`run_backtest` for one parameter set.
 
     Attributes:
-        dates: Calendar week-start dates that contributed to the equity curve
-            (only rebalanced weeks; warm-up weeks are absent).
+        dates: Calendar week-start dates of the **return weeks** that
+            contributed to the equity curve (only rebalanced weeks; warm-up
+            weeks are absent).  The weights recorded at each date were formed
+            from the prior week's information (w(t) × r(t+1)).
         gross_returns: Pre-cost portfolio return for each week in ``dates``.
         net_returns: Post-cost portfolio return (``gross - costs``).
         turnover: Sum of absolute weight changes each week (``Σ|Δwᵢ|``).
-        weights: End-of-period weight book per week (after crypto-cap but before
-            the next week's rebalance).
+        weights: Weight book held during each return week (after crypto-cap
+            but before the next week's rebalance).
     """
 
     dates: list[date] = field(default_factory=list)
@@ -135,8 +145,11 @@ def run_backtest(
             defaults where DBC roll is already in the NAV).
 
     Returns:
-        :class:`BacktestResult` with dates, gross/net returns, turnover, and
-        end-of-period weights for each rebalanced week.
+        :class:`BacktestResult` with dates (return weeks), gross/net returns,
+        turnover, and the weight book held during each rebalanced week.  The
+        book earning each week's return was formed from the prior week's
+        signal and volatility (w(t) × r(t+1) timing contract, see module
+        docstring).
     """
     if not rows_by_symbol:
         return BacktestResult()
@@ -175,17 +188,26 @@ def run_backtest(
     )
 
     # ── Main loop ─────────────────────────────────────────────────────────────
+    #
+    # Timing contract: w(t) × r(t+1).  The signal for week t closes on Sunday
+    # night of week t; the book is traded on the Monday that opens week t+1 and
+    # earns that week's return.  Both the signal sign and realized_vol_26w are
+    # read from the signal week (the vol window includes week t, so it is fully
+    # known when the position is sized).  The last date in all_dates forms a
+    # book with no following return and is not recorded.  If dates are not
+    # contiguous, the book simply trades on a stale (but past) signal — no
+    # look-ahead either way.
     result = BacktestResult()
     prev_weights: dict[str, float] = {}
 
-    for wk in all_dates:
-        # Build the cross-section for this week:
-        # one row per symbol that has a live signal entry for this date.
+    for signal_wk, ret_wk in zip(all_dates, all_dates[1:]):
+        # Build the cross-section from the signal week: one row per symbol that
+        # has a live signal entry at that date.
         cross_section: list[dict[str, Any]] = []
         for sym, sig_map in signal_lookup.items():
-            if wk not in sig_map:
+            if signal_wk not in sig_map:
                 continue
-            sig_entry = sig_map[wk]
+            sig_entry = sig_map[signal_wk]
             cross_section.append(
                 {
                     "symbol": sym,
@@ -209,9 +231,10 @@ def run_backtest(
 
         # ── Gross portfolio return (simple, cross-asset additive) ─────────────
         # Uses excess_return (simple column from T-21), not excess_log_return.
-        # Log returns are not additive across assets.
+        # Log returns are not additive across assets.  The return is the NEXT
+        # week's (ret_wk) — the week the book is actually held.
         gross_return = math.fsum(
-            w * return_lookup.get(sym, {}).get(wk, 0.0)
+            w * return_lookup.get(sym, {}).get(ret_wk, 0.0)
             for sym, w in weights.items()
         )
 
@@ -238,7 +261,7 @@ def run_backtest(
         net_return = gross_return + cost  # cost is already ≤ 0
 
         # ── Record ────────────────────────────────────────────────────────────
-        result.dates.append(wk)
+        result.dates.append(ret_wk)
         result.gross_returns.append(gross_return)
         result.net_returns.append(net_return)
         result.turnover.append(total_turnover)
