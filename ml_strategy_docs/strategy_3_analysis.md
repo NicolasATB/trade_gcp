@@ -386,8 +386,12 @@ T-21 view), not two silently-different ones.
 >   for cross-asset aggregation (log returns are NOT additive across assets); feeds
 >   `excess_log_return` to `compute_tsmom_rows` (additive per-asset); reuses
 >   `build_portfolio` from T-23; applies `cost_multiplier` grid {1.0, 1.5, 2.0} via
->   `transaction_cost_return`. `BacktestResult` with gross/net returns, turnover,
->   end-of-period weights, and `equity_curve()` helper.
+>   `transaction_cost_return`. **Timing contract w(t) × r(t+1):** the signal for week t
+>   closes on the Sunday that ends week t (both the formation window and the
+>   `realized_vol_26w` window include week t), the book trades on the Monday opening
+>   week t+1 and earns that week's return — `BacktestResult.dates` holds **return
+>   weeks**. `BacktestResult` with gross/net returns, turnover, the weight book held
+>   each week, and `equity_curve()` helper.
 > - `prod_trade_strategy.experiment_runs` — trial ledger DDL added to `sql/DDL.sql`; writer
 >   is `research/run_experiments.py` (T-26). Schema: `experiment_run_id`, params JSON,
 >   `cost_multiplier`, fold stats (Sharpe/Sortino/MaxDD/Calmar), DSR, PBO, HLZ t-stat,
@@ -532,6 +536,11 @@ TSMOM targets 10% via vol scaling.
 
 ### Walk-forward notes
 
+- **Timing (w(t) × r(t+1), same as the engine):** TSH and vol-BH size each return week
+  with the *prior* week's `realized_vol_26w` — the vol window in the T-21 view includes
+  the current week, so sizing week t's return with vol(t) would peek at that week. The
+  60/40 passive needs no shift: its weights are unconditional constants, and drift is
+  applied only after a week's return is recorded.
 - **Fold alignment:** all four strategies are trimmed to the intersection of active dates
   per fold before computing metrics. Ensures `δ_t = net_TSMOM(t) − net_TSH(t)` is a
   term-by-term subtraction on identical periods.

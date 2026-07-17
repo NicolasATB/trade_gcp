@@ -56,16 +56,18 @@ class TestHandCheckedArithmetic:
         Two instruments, both long (positive formation return → signal = +1),
         weights +0.5 each (equal-weight, 2 actives).
         Week 1 is warm-up (formation_horizon=2, only 1 row → no signal).
-        Week 2 is the first week with a formation window → live signal.
+        Week 2 (dates[1]) is the first week with a formation window → live
+        signal; the book it forms earns the NEXT week's return (w(t) × r(t+1)),
+        so the first recorded week is dates[2].
 
-        Row columns at dates[1] (the first live signal week):
-          SPY: excess_return = 0.20 (simple), excess_log_return = 0.10 (log)
-          IEF: excess_return = 0.10 (simple), excess_log_return = 0.05 (log)
+        Row columns at dates[2] (the first return week):
+          SPY: excess_return = 0.04 (simple), excess_log_return = 0.02 (log)
+          IEF: excess_return = 0.02 (simple), excess_log_return = 0.01 (log)
 
-        Expected gross_return using simple: 0.5 × 0.20 + 0.5 × 0.10 = 0.15
+        Expected gross_return using simple: 0.5 × 0.04 + 0.5 × 0.02 = 0.03
 
         If the engine mistakenly reads excess_log_return:
-          0.5 × 0.10 + 0.5 × 0.05 = 0.075 ← wrong by 0.075
+          0.5 × 0.02 + 0.5 × 0.01 = 0.015 ← wrong by 0.015
         The 2× ratio between simple and log columns makes misidentification obvious.
         """
         start = _monday(2020, 1, 6)
@@ -93,16 +95,48 @@ class TestHandCheckedArithmetic:
             cost_multiplier=1.0,
         )
 
-        # First rebalanced week is dates[1] (formation_horizon=2).
-        assert result.dates[0] == dates[1]
+        # First signal is live at dates[1] (formation_horizon=2); its book
+        # earns the return of dates[2] — the first recorded week.
+        assert result.dates[0] == dates[2]
         # equal_weight → +0.5 each (both long); gross uses simple column.
-        # Using simple: 0.5*0.20 + 0.5*0.10 = 0.15
-        # Using log (wrong): 0.5*0.10 + 0.5*0.05 = 0.075
-        assert result.gross_returns[0] == pytest.approx(0.15, abs=1e-6), (
-            f"Engine read wrong excess-return column: expected 0.15 (simple), "
+        # Using simple: 0.5*0.04 + 0.5*0.02 = 0.03
+        # Using log (wrong): 0.5*0.02 + 0.5*0.01 = 0.015
+        assert result.gross_returns[0] == pytest.approx(0.03, abs=1e-6), (
+            f"Engine read wrong excess-return column: expected 0.03 (simple), "
             f"got {result.gross_returns[0]:.6f}.  "
-            f"If ≈0.075 it used excess_log_return."
+            f"If ≈0.015 it used excess_log_return."
         )
+
+
+class TestNoLookAhead:
+    """Regression guard for the w(t) × r(t) look-ahead bug.
+
+    With formation_horizon=1 the signal at week t is sign(r(t)).  On a series
+    of alternating-sign returns, an engine that pays the SAME week's return to
+    the signal's book (w(t) × r(t)) has perfect foresight and wins every week
+    (+|r|); the honest engine (w(t) × r(t+1)) trades into a sign flip and loses
+    every week (−|r|).
+    """
+
+    def test_alternating_returns_lose_every_week(self):
+        start = _monday(2020, 1, 6)
+        dates = _mondays(start, 12)
+        rows = [
+            _make_row(d, 0.10 if i % 2 == 0 else -0.10,
+                      0.10 if i % 2 == 0 else -0.10)
+            for i, d in enumerate(dates)
+        ]
+        params = TsmomParams(formation_horizon=1, vol_target=0.10, vol_lookback=2)
+        result = run_backtest({"SPY": rows}, params, PORT_PARAMS, with_crypto=False)
+
+        assert result.dates, "expected recorded weeks with formation_horizon=1"
+        # First signal forms at dates[0]; first return earned at dates[1].
+        assert result.dates[0] == dates[1]
+        for wk, g in zip(result.dates, result.gross_returns):
+            assert g == pytest.approx(-0.10, abs=1e-9), (
+                f"Gross return at {wk} is {g:+.4f}; +0.10 means the engine "
+                f"paid the signal week's own return (look-ahead)."
+            )
 
 
 class TestWarmUp:

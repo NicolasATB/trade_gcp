@@ -14,6 +14,16 @@ Three baselines, each neutralising exactly one dimension relative to TSMOM:
   60/40 Passive — 30 % SPY + 30 % EFA + 20 % IEF + 20 % TLT, fixed weights,
   annual drift rebalance.  Pure passive benchmark.
 
+Timing contract (same as the engine, w(t) × r(t+1))
+---------------------------------------------------
+TSH and vol-BH size positions with the ``realized_vol_26w`` of the week
+*before* each return week: the vol window in the T-21 view includes the
+current week, so sizing week t's return with vol(t) would peek at that week.
+The signal direction itself carries no timing (TSH is fixed from the training
+window; vol-BH is always +1).  The 60/40 passive baseline needs no shift: its
+weights are unconditional constants (plus drift, which is applied only after a
+week's return is recorded).
+
 Comparability notes
 -------------------
 Sharpe and Sortino are scale-invariant and comparable across all four strategies.
@@ -32,7 +42,7 @@ across strategies.
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from backtest.costs import CRYPTO_SYMBOLS, transaction_cost_return
@@ -115,6 +125,8 @@ def run_tsh_baseline(
     per symbol; the sign is fixed for the entire test window of the fold.  Vol
     scaling and portfolio construction are identical to TSMOM — only the signal
     formation horizon differs (entire training window vs 52-week trailing window).
+    Each return week is sized with the *prior* week's ``realized_vol_26w``
+    (w(t) × r(t+1) timing contract, see module docstring).
 
     This is the strictest benchmark per Huang et al. (2020 JFE): if TSMOM does
     not beat TSH, the 52-week formation adds nothing over the historical mean direction.
@@ -156,16 +168,20 @@ def run_tsh_baseline(
         if sig is not None and sig != 0:
             tsh_signals[sym] = sig
 
-    # Run over test dates with the fixed TSH signal.
+    # Run over test dates with the fixed TSH signal.  Sizing (vol) comes from
+    # the week before each return week — vol(t) includes week t's return, so
+    # using it to size week t's book would be look-ahead (timing contract in
+    # the module docstring).
     result = BacktestResult()
     prev_weights: dict[str, float] = {}
     for wk in sorted(frozenset(test_dates)):
+        sizing_wk = wk - timedelta(weeks=1)
         cross_section: list[dict[str, Any]] = []
         for sym, sig in tsh_signals.items():
             sym_map = rows_lookup.get(sym, {})
-            if wk not in sym_map:
+            if sizing_wk not in sym_map:
                 continue
-            row = sym_map[wk]
+            row = sym_map[sizing_wk]
             cross_section.append({
                 "symbol": sym,
                 "signal": sig,
@@ -210,7 +226,8 @@ def run_vol_bh_baseline(
     Signal = +1 for every instrument every week.  Vol scaling and portfolio
     construction are identical to TSMOM; only the signal direction is neutralised
     (Kim et al. 2016 JFM isolation: if vol-BH ≈ TSMOM, vol scaling drives returns,
-    not momentum).
+    not momentum).  Each return week is sized with the *prior* week's
+    ``realized_vol_26w`` (w(t) × r(t+1) timing contract, see module docstring).
 
     Args:
         rows_by_symbol: Per-symbol row dicts, sorted ascending by ``week_start``.
@@ -230,14 +247,17 @@ def run_vol_bh_baseline(
             sym_map[wk] = row
         rows_lookup[sym] = sym_map
 
+    # Sizing (vol) comes from the week before each return week — vol(t)
+    # includes week t's return (timing contract in the module docstring).
     result = BacktestResult()
     prev_weights: dict[str, float] = {}
     for wk in sorted(frozenset(test_dates)):
+        sizing_wk = wk - timedelta(weeks=1)
         cross_section: list[dict[str, Any]] = []
         for sym, sym_map in rows_lookup.items():
-            if wk not in sym_map:
+            if sizing_wk not in sym_map:
                 continue
-            row = sym_map[wk]
+            row = sym_map[sizing_wk]
             cross_section.append({
                 "symbol": sym,
                 "signal": 1,
@@ -285,6 +305,10 @@ def run_passive_baseline(
     Rebalance to :data:`PASSIVE_WEIGHTS` at week 0 (inception) and every
     ``rebalance_weeks`` thereafter.  Transaction costs are applied only at
     rebalance; no costs between rebalances (natural drift, no trades).
+
+    No timing shift is needed here: the weights are unconditional constants
+    (no signal, no vol sizing), and the drift into next week's weights is
+    applied only after the current week's return is recorded.
 
     Args:
         rows_by_symbol: Per-symbol row dicts; must carry ``simple_return`` and
