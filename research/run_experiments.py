@@ -354,10 +354,12 @@ def _print_results(wf: dict[str, Any]) -> None:  # pragma: no cover
     print("-" * 75)
     mean_d = wf["gate_mean_delta"]
     t_hac = wf["gate_t_stat_hac"]
-    gate_pass = "PASS ✓" if t_hac > GATE_THRESHOLD else "FAIL ✗"
+    gate_pass = "PASS" if t_hac > GATE_THRESHOLD else "FAIL"
+    # ASCII-only output: Windows consoles default to cp1252, which cannot
+    # encode characters like the Greek delta.
     print(
-        f"\nGate (TSMOM vs TSH, cost×1.0): "
-        f"mean_δ={mean_d:.5f}  t_HAC={t_hac:.3f}  "
+        f"\nGate (TSMOM vs TSH, cost x1.0): "
+        f"mean_delta={mean_d:.5f}  t_HAC={t_hac:.3f}  "
         f"threshold={GATE_THRESHOLD}  [{gate_pass}]"
     )
     print(f"Pooled obs: {sum(len(r.net_returns) for r in wf['fold_bucket'][1.0]['tsmom'])}")
@@ -377,6 +379,10 @@ def _load_rows_from_bq(project: str) -> dict[str, list[dict]]:  # pragma: no cov
             excess_log_return, excess_return, simple_return, realized_vol_26w
         FROM `{project}.prod_trade_silver.vw_asset_returns_weekly`
         WHERE week_start < '{HOLDOUT_START}'
+          -- Each symbol's first week has NULL returns (LAG has no prior row);
+          -- the engine contract forbids non-finite values inside a formation
+          -- window (gaps are handled upstream), so exclude them at the loader.
+          AND excess_log_return IS NOT NULL
         ORDER BY symbol, week_start
     """
     rows_by_symbol: dict[str, list[dict]] = {}
@@ -397,9 +403,18 @@ def _insert_rows_to_bq(project: str, rows: list[dict]) -> None:  # pragma: no co
 
     client = bigquery.Client(project=project)
     table_ref = f"{project}.{BQ_TABLE}"
-    errors = client.insert_rows_json(table_ref, rows)
-    if errors:
-        raise RuntimeError(f"BQ streaming insert errors: {errors}")
+    # Batch load job, not insert_rows_json: streaming inserts 404 on freshly
+    # created tables (metadata propagation) and leave rows in the streaming
+    # buffer; a load job is atomic and buffer-free (project convention:
+    # batch loads over streaming inserts).
+    job = client.load_table_from_json(
+        rows,
+        table_ref,
+        job_config=bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        ),
+    )
+    job.result()
     print(f"Inserted {len(rows)} rows into {table_ref}")
 
 

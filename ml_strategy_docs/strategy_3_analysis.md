@@ -59,6 +59,36 @@ documented as is. The prior is low (everything directional in this program died 
 scrutiny: McLean-Pontiff 2016, Harvey-Liu-Zhu 2016). Low prior ≠ not worth testing.
 For the project's real purpose, the test *is* the product.
 
+### Why TSMOM v1 first, XTSMOM as a separate epic
+
+If XTSMOM is the only clean survivor, why is v1 diagonal TSMOM? Four reasons, in
+order of weight:
+
+1. **TSMOM is the control XTSMOM needs to be interpretable.** Pitkäjärvi et al.'s
+   central claim is *relative*: per-instrument TSMOM alpha disappears once you control
+   for XTSMOM. Replicating that post-2016 requires our own measured diagonal TSMOM on
+   the same universe and period first — TSMOM v1 is not a detour, it is the
+   experiment's denominator.
+2. **De-risk the apparatus on the simplest possible strategy.** Diagonal TSMOM has one
+   real parameter (formation horizon) and trivial mechanics, so it exercises everything
+   else — multi-asset ingest, weekly resample, vol scaling, costs, purged walk-forward,
+   DSR/PBO — with minimal strategy-side complexity. This already paid off: the engine's
+   look-ahead bug (w(t) paired with r(t) instead of r(t+1)) was caught under the simple
+   strategy, before it could contaminate a far more expensive XTSMOM run.
+3. **Trial budget and multiplicity.** XTSMOM opens a much larger parameter space (which
+   class predicts which, at what lag and horizon). Mixing both into one campaign would
+   burn the pre-committed 10–15-trial budget and confound attribution between own-asset
+   momentum, the cross-asset channel, and vol scaling.
+4. **Holdout economics.** The blind holdout is a one-way door; spending it on XTSMOM
+   with an unproven apparatus would bet the project's scarcest asset on the first run.
+   The sequence spends v1's holdout on the cheap strategy and leaves XTSMOM its own
+   validation route, designed on a debugged apparatus (the train/holdout boundary was
+   fixed with that future epic in mind — see `backtest/splitter.py`).
+
+A minor fifth factor: the correlation flip lowers XTSMOM's prior in the current regime,
+so buying the cheap information first (does TSMOM ≠ TSH on this universe?) before the
+expensive test is simply good experiment ordering.
+
 ---
 
 ## Data sources per class
@@ -573,14 +603,32 @@ correct. `dsr=NULL`, `hlz_tstat=NULL` in all T-26 `experiment_runs` rows.
 
 ### Results
 
+> Run 2026-07-17 — engine under the `w(t) × r(t+1)` timing contract, 5 expanding
+> folds (min_train 104w, purge 3w, embargo 2w), 1,343 pooled test weeks. 12 rows
+> written to `experiment_runs` (`dsr` / `pbo` / `hlz_tstat` NULL — deferred to
+> T-27; `holdout_spent = FALSE` on every row).
+
 | Strategy | Cost mult | CV Sharpe (net) | CV Sortino | Gate t-stat (HAC) |
 |---|---|---|---|---|
-| TSMOM seed v1 | 1.0 | — | — | — |
-| TSH | 1.0 | — | — | (ref) |
-| Vol-BH | 1.0 | — | — | — |
-| 60/40 passive | 1.0 | — | — | — |
+| TSMOM seed v1 | 1.0 | 0.445 | 0.690 | **2.309 — PASS** |
+| TSH | 1.0 | −0.144 | −0.273 | (ref) |
+| Vol-BH | 1.0 | 0.518 | 0.762 | — |
+| 60/40 passive | 1.0 | 0.413 | 0.624 | — |
 
-*Fill after running `python -m research.run_experiments --project trade-390514`.*
+Cost sensitivity (net CV Sharpe at ×1.0 / ×1.5 / ×2.0): TSMOM 0.445 / 0.404 / 0.364;
+TSH −0.144 / −0.156 / −0.168; vol-BH 0.518 / 0.506 / 0.495; 60/40 0.413 / 0.412 / 0.410.
+
+**Reading (gate only — the verdict belongs to T-27/T-28):**
+
+- **Gate PASSES:** `mean_δ = 0.00171`/week, `t_HAC = 2.309 > 1.64` (Newey-West,
+  L=52). On this sample the 52-week formation adds signal over the historical-mean
+  direction — the Huang et al. (2020) equivalence to TSH is rejected at the
+  pre-committed one-sided α = 0.10. Epic 8 proceeds to T-27.
+- **Honest flag for the verdict:** vol-BH's CV Sharpe (0.518) *exceeds* TSMOM's
+  (0.445) — consistent with Kim et al. (2016): vol scaling, not the momentum sign,
+  does much of the work in a net-long sample. The gate only claims the signal beats
+  TSH; whether TSMOM earns its keep against an always-long vol-scaled book is
+  principle-2 material for T-27/T-28.
 
 ---
 

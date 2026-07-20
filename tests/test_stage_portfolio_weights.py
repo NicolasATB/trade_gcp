@@ -112,9 +112,22 @@ class TestParseSignalRow:
         assert parsed["is_crypto"] is False
 
     def test_is_crypto_true_for_btc(self):
-        row = _make_signal_row("BTC", 1, vol=0.90)
+        row = _make_signal_row("BTCUSD", 1, vol=0.90)
         parsed = _parse_signal_row(row)
         assert parsed["is_crypto"] is True
+
+    def test_trigger_params_as_json_string(self):
+        # ReadFromBigQuery returns a JSON column as a serialised string, not a
+        # dict — _parse_signal_row must decode it before field access.
+        row = {
+            "symbol": "SPY",
+            "signal_start": "2023-01-02T00:00:00+00:00",
+            "trigger_params": '{"signal": 1, "realized_vol_26w": 0.12}',
+        }
+        parsed = _parse_signal_row(row)
+        assert parsed is not None
+        assert parsed["signal"] == 1
+        assert parsed["realized_vol_26w"] == pytest.approx(0.12)
 
     def test_missing_trigger_params_returns_none(self):
         row = {"symbol": "SPY", "signal_start": "2023-01-02T00:00:00+00:00"}
@@ -155,7 +168,7 @@ class TestParseSignalRow:
 
 class TestIsCrypto:
     def test_btc_is_crypto(self):
-        assert _IS_CRYPTO["BTC"] is True
+        assert _IS_CRYPTO["BTCUSD"] is True
 
     def test_etf_symbols_are_not_crypto(self):
         for symbol in ("SPY", "EFA", "IEF", "TLT", "GLD", "DBC", "UUP", "FXY"):
@@ -167,7 +180,7 @@ class TestIsCrypto:
 
     def test_only_btc_is_crypto_in_universe(self):
         crypto_symbols = [sym for sym, is_c in _IS_CRYPTO.items() if is_c]
-        assert crypto_symbols == ["BTC"]
+        assert crypto_symbols == ["BTCUSD"]
 
 
 # ---------------------------------------------------------------------------

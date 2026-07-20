@@ -45,7 +45,6 @@ import statistics
 from dataclasses import dataclass
 from itertools import combinations
 
-
 # ── Period-level stats ───────────────────────────────────────────────────────
 
 def annualized_sharpe(returns: list[float], periods_per_year: int = 52) -> float:
