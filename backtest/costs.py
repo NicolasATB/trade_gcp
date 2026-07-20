@@ -15,7 +15,7 @@ Crypto carries the currency pair; the eight ETFs use clean tickers.
 Roll-cost note (DBC)
 --------------------
 DBC is a broad commodity ETF that wraps futures.  Its roll/contango cost is
-**embedded in the NAV** and therefore already captured in the price-return series
+**embedded in the NAV** and therefore already captured in the price (NAV)
 stored in bronze/silver (T-18, T-21).  Adding an explicit roll cost on top would
 double-count.  ``ROLL_COST_BPS_PA`` is therefore zero for all instruments by
 default and exists only as a **sensitivity hook** — set it non-zero to measure

@@ -108,10 +108,11 @@ Yahoo (16, primary, keyless) + Tiingo (17, fallback, token) — into `yahoo_etf_
 BTC reuses spot. `coinapi_*` / `investing_*` DDL ready, ingestion pending.
 
 **Silver.** `ohlcv_validated` = typed, de-duplicated **multi-asset** OHLCV (`1d` + `1w`),
-split-adjusted price-return (not total-return). `rsi_features` = Wilder RSI with recursive
+split-adjusted close. `rsi_features` = Wilder RSI with recursive
 state for `1d`/`1w` (idempotent incremental updates, reusable across strategies).
-`vw_asset_returns_weekly` = the Strategy-3 TSMOM feature layer: per-symbol weekly returns,
-excess returns vs the FRED DFF risk-free (point-in-time) and realized vol (×√52).
+`vw_asset_returns_weekly` = the Strategy-3 TSMOM feature layer: per-symbol weekly
+**total-return** (split-adjusted price + reinvested Tiingo dividends), excess returns vs
+the FRED DFF risk-free (point-in-time) and realized vol (×√52).
 
 **Gold.** `fact_signals` (one row per `symbol/temporality/signal_start/strategy_id`) is
 shared by strategy_id=1 (RSI) and strategy_id=3 (TSMOM); MERGE is upsert-only so each

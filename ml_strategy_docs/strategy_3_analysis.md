@@ -99,12 +99,13 @@ source, Tiingo as a competing fallback. Crypto reuses the existing spot ingest
 
 Futures are more cost-accurate but carry roll/contango and the point-in-time
 active-contract hygiene a v1 pipeline doesn't need. ETFs are simple and continuous; the
-conformed close is **split-adjusted but not dividend-adjusted** (a price-return level, not
-total-return) — enough to exercise the multi-asset pipeline.
+conformed close is a clean **split-adjusted** price level, and the weekly return layer
+(`vw_asset_returns_weekly`) reinvests split-adjusted cash dividends to form a
+**total-return** series (T-26b) — enough to exercise the multi-asset pipeline.
 
 | Asset class | Instrument (v1) | Source (primary / fallback) | Avoids roll? | Trade-off / rationale |
 |---|---|---|---|---|
-| Equity indices | ETF (e.g. SPY / EFA / EEM) | Yahoo / Tiingo | Yes | Liquid proxy; close is split-adjusted price-return (not dividend-adjusted); futures add roll + active-contract tracking for no v1 gain. |
+| Equity indices | ETF (e.g. SPY / EFA / EEM) | Yahoo / Tiingo | Yes | Liquid proxy; split-adjusted close + reinvested dividends = total-return (T-26b); futures add roll + active-contract tracking for no v1 gain. |
 | Gov. bonds | Treasury ETF (e.g. SHY / IEF / TLT) | Yahoo / Tiingo | Yes | Continuous split-adjusted level without managing the roll calendar / cheapest-to-deliver. |
 | Commodities | Physical (GLD) / broad ETF (e.g. DBC) | Yahoo / Tiingo | Partially | "No-roll" holds only for physically-backed ETFs; broad commodity ETFs are futures wrappers — roll/contango is **embedded in NAV**, not eliminated (a cost v1 does not isolate). |
 | FX | Currency ETF (e.g. UUP / FXE / FXY) | Yahoo / Tiingo | N/A | Thinner, embeds money-market carry + expense ratio vs spot/forwards; acceptable as a v1 directional proxy. |
@@ -128,8 +129,16 @@ total-return) — enough to exercise the multi-asset pipeline.
   (`adj_close = raw_close / Π(split_factor where ex_date > D)`), an **auditable silver step**
   applied before the priority de-dup in `conform` — proven on EFA (divergence collapsed from
   avg 10.1% / max 69% to avg 0.004%). T-21 stores Tiingo's `split_factor` / `div_cash` in bronze
-  (raw provider fields) to drive it. Neither source is dividend-adjusted, so the series is
-  **price-return, not total-return** — a documented v1 limitation.
+  (raw provider fields) to drive it.
+- **T-26b closes the total-return gap.** `vw_asset_returns_weekly` now adds each week's cash
+  dividends back to the price return: dividends are sourced from Tiingo's `div_cash` (Yahoo's
+  chart quote carries none, so they come from Tiingo even on weeks whose price came from Yahoo)
+  and split-adjusted with the **same** factor `conform` applies to the close, so dividend and
+  price share one basis. The exported `simple_return` / `excess_return` are total-return;
+  `price_simple_return` / `price_log_return` keep the dividend-free level for audit and for the
+  price-vs-total bias comparison. This matters because the baselines lean on high-dividend
+  assets (TSH favours bonds + SPY; 60/40 holds 40% bonds), so a price-return series understated
+  them and inflated TSMOM's edge over TSH/60-40.
 - **Per-instrument registration landed in T-20** (the bronze ingest ticket), alongside
   the bronze tables: Yahoo (`source_id` 16, priority 2) and Tiingo (17, priority 1) are
   seeded in `sql/DDL.sql`, competing in the silver consolidation — no orphan
@@ -603,10 +612,17 @@ correct. `dsr=NULL`, `hlz_tstat=NULL` in all T-26 `experiment_runs` rows.
 
 ### Results
 
-> Run 2026-07-17 — engine under the `w(t) × r(t+1)` timing contract, 5 expanding
-> folds (min_train 104w, purge 3w, embargo 2w), 1,343 pooled test weeks. 12 rows
-> written to `experiment_runs` (`dsr` / `pbo` / `hlz_tstat` NULL — deferred to
-> T-27; `holdout_spent = FALSE` on every row).
+> ⚠️ **Stale — price-return run, superseded by T-26b.** The numbers below were
+> computed before dividends were added to `vw_asset_returns_weekly`. Because the
+> baselines lean on high-dividend assets, the total-return re-run is expected to
+> lift TSH/60-40 and shrink the TSMOM-vs-TSH gap; the gate must be re-evaluated on
+> total-return before the verdict. Re-run `python -m research.run_experiments
+> --project trade-390514` after the view is deployed and replace this block.
+
+> Run 2026-07-17 (price-return) — engine under the `w(t) × r(t+1)` timing contract,
+> 5 expanding folds (min_train 104w, purge 3w, embargo 2w), 1,343 pooled test weeks.
+> 12 rows written to `experiment_runs` (`dsr` / `pbo` / `hlz_tstat` NULL — deferred
+> to T-27; `holdout_spent = FALSE` on every row).
 
 | Strategy | Cost mult | CV Sharpe (net) | CV Sortino | Gate t-stat (HAC) |
 |---|---|---|---|---|
