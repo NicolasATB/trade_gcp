@@ -1388,6 +1388,7 @@ LEFT JOIN `trade-390514.prod_trade_bronze.coinmetrics_btc_tx_count_daily_raw` AS
 CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.experiment_runs` (
   experiment_run_id     STRING    NOT NULL OPTIONS(description = "UUID for this trial run."),
   created_at            TIMESTAMP NOT NULL OPTIONS(description = "When the trial was executed."),
+  run_label             STRING    OPTIONS(description = "Optional human-readable tag for the run (e.g. 'total-return / fix dividends'), set via run_experiments --label. Distinguishes re-runs beyond created_at; NULL for older rows written before the flag existed."),
   tsmom_params_json     STRING    OPTIONS(description = "JSON-serialised TsmomParams (incl. vol_scaling flag)."),
   portfolio_params_json STRING    OPTIONS(description = "JSON-serialised PortfolioParams (scheme + crypto_cap)."),
   cost_multiplier       FLOAT64   OPTIONS(description = "Sensitivity grid value used (1.0 / 1.5 / 2.0)."),

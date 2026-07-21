@@ -612,39 +612,41 @@ correct. `dsr=NULL`, `hlz_tstat=NULL` in all T-26 `experiment_runs` rows.
 
 ### Results
 
-> ⚠️ **Stale — price-return run, superseded by T-26b.** The numbers below were
-> computed before dividends were added to `vw_asset_returns_weekly`. Because the
-> baselines lean on high-dividend assets, the total-return re-run is expected to
-> lift TSH/60-40 and shrink the TSMOM-vs-TSH gap; the gate must be re-evaluated on
-> total-return before the verdict. Re-run `python -m research.run_experiments
-> --project trade-390514` after the view is deployed and replace this block.
-
-> Run 2026-07-17 (price-return) — engine under the `w(t) × r(t+1)` timing contract,
-> 5 expanding folds (min_train 104w, purge 3w, embargo 2w), 1,343 pooled test weeks.
-> 12 rows written to `experiment_runs` (`dsr` / `pbo` / `hlz_tstat` NULL — deferred
-> to T-27; `holdout_spent = FALSE` on every row).
+> Run 2026-07-20 (**total-return**, `run_label = 'total-return / fix dividends'`) —
+> engine under the `w(t) × r(t+1)` timing contract, 5 expanding folds (min_train
+> 104w, purge 3w, embargo 2w), 1,343 pooled test weeks. 12 rows written to
+> `experiment_runs` (`dsr` / `pbo` / `hlz_tstat` NULL — deferred to T-27;
+> `holdout_spent = FALSE` on every row). The earlier price-return run
+> (2026-07-17, `run_label = 'price-return baseline (T-26)'`) is retained in
+> `experiment_runs` for the before/after comparison.
 
 | Strategy | Cost mult | CV Sharpe (net) | CV Sortino | Gate t-stat (HAC) |
 |---|---|---|---|---|
-| TSMOM seed v1 | 1.0 | 0.445 | 0.690 | **2.309 — PASS** |
-| TSH | 1.0 | −0.144 | −0.273 | (ref) |
-| Vol-BH | 1.0 | 0.518 | 0.762 | — |
-| 60/40 passive | 1.0 | 0.413 | 0.624 | — |
+| TSMOM seed v1 | 1.0 | 0.615 | 0.952 | **0.384 — FAIL** |
+| TSH | 1.0 | 0.582 | 0.832 | (ref) |
+| Vol-BH | 1.0 | 0.780 | 1.129 | — |
+| 60/40 passive | 1.0 | 0.622 | 0.897 | — |
 
-Cost sensitivity (net CV Sharpe at ×1.0 / ×1.5 / ×2.0): TSMOM 0.445 / 0.404 / 0.364;
-TSH −0.144 / −0.156 / −0.168; vol-BH 0.518 / 0.506 / 0.495; 60/40 0.413 / 0.412 / 0.410.
+Cost sensitivity (net CV Sharpe at ×1.0 / ×1.5 / ×2.0): TSMOM 0.615 / 0.573 / 0.532;
+TSH 0.582 / 0.573 / 0.563; vol-BH 0.780 / 0.769 / 0.757; 60/40 0.622 / 0.621 / 0.620.
 
 **Reading (gate only — the verdict belongs to T-27/T-28):**
 
-- **Gate PASSES:** `mean_δ = 0.00171`/week, `t_HAC = 2.309 > 1.64` (Newey-West,
-  L=52). On this sample the 52-week formation adds signal over the historical-mean
-  direction — the Huang et al. (2020) equivalence to TSH is rejected at the
-  pre-committed one-sided α = 0.10. Epic 8 proceeds to T-27.
-- **Honest flag for the verdict:** vol-BH's CV Sharpe (0.518) *exceeds* TSMOM's
-  (0.445) — consistent with Kim et al. (2016): vol scaling, not the momentum sign,
-  does much of the work in a net-long sample. The gate only claims the signal beats
-  TSH; whether TSMOM earns its keep against an always-long vol-scaled book is
-  principle-2 material for T-27/T-28.
+- **Gate FAILS:** `mean_δ = 0.00021`/week, `t_HAC = 0.384 < 1.64` (Newey-West,
+  L=52). On total-return the 52-week formation adds **no** measurable signal over the
+  historical-mean direction — the Huang et al. (2020) equivalence to TSH is **not
+  rejected** at the pre-committed one-sided α = 0.10. Under the pre-committed decision
+  rule, TSMOM v1 does not clear the baseline.
+- **What changed vs the price-return run.** The prior run (2026-07-17) passed the gate
+  (`t_HAC = 2.309`) only because the price-return series understated the
+  dividend-paying baselines: TSH's CV Sharpe rose from **−0.144 to +0.582** once
+  dividends were added (TSH is long bonds + SPY), and the TSMOM-vs-TSH gap collapsed
+  (`mean_δ` 0.00171 → 0.00021). **The apparent edge was largely a dividend-accounting
+  artifact** — exactly the bias the T-26b total-return fix was built to remove, caught
+  before the holdout was spent.
+- **Corroborating flag:** vol-BH's CV Sharpe (0.780) is the highest of the four and
+  exceeds TSMOM's (0.615) — consistent with Kim et al. (2016): in a net-long sample
+  vol scaling, not the momentum sign, does the work.
 
 ---
 

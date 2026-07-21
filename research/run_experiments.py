@@ -23,7 +23,7 @@ import json
 import math
 import statistics
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from backtest.baselines import (
@@ -165,6 +165,7 @@ def _build_row(
     cost_mult: float,
     fold_net_returns: list[list[float]],
     n_cv_folds: int,
+    run_label: str | None = None,
 ) -> dict:
     """Build one experiment_runs row from aggregated fold results."""
     sharpes = [annualized_sharpe(r) for r in fold_net_returns]
@@ -177,7 +178,8 @@ def _build_row(
 
     return {
         "experiment_run_id": str(uuid.uuid4()),
-        "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "run_label": run_label,
         "tsmom_params_json": tsmom_params_json,
         "portfolio_params_json": portfolio_params_json,
         "cost_multiplier": cost_mult,
@@ -208,6 +210,7 @@ def run_walk_forward(
     cfg: WalkForwardConfig,
     *,
     with_crypto: bool,
+    run_label: str | None = None,
 ) -> dict[str, Any]:
     """Run walk-forward for all trials.
 
@@ -307,20 +310,20 @@ def run_walk_forward(
                 "vol_lookback": TSMOM_V1.vol_lookback,
                 "periods_per_year": TSMOM_V1.periods_per_year,
             }),
-            portfolio_json, cm, tsmom_net, n_completed_folds,
+            portfolio_json, cm, tsmom_net, n_completed_folds, run_label=run_label,
         ))
         result_rows.append(_build_row(
             json.dumps({"strategy": "tsh", "vol_target": TSMOM_V1.vol_target}),
-            portfolio_json, cm, tsh_net, n_completed_folds,
+            portfolio_json, cm, tsh_net, n_completed_folds, run_label=run_label,
         ))
         result_rows.append(_build_row(
             json.dumps({"strategy": "vol_bh", "vol_target": TSMOM_V1.vol_target}),
-            portfolio_json, cm, vbh_net, n_completed_folds,
+            portfolio_json, cm, vbh_net, n_completed_folds, run_label=run_label,
         ))
         result_rows.append(_build_row(
             json.dumps({"strategy": "60_40"}),
             json.dumps({"weights": PASSIVE_WEIGHTS}),
-            cm, pas_net, n_completed_folds,
+            cm, pas_net, n_completed_folds, run_label=run_label,
         ))
 
     # Gate stat at base cost (1.0): pool all test-week net returns.
@@ -432,6 +435,11 @@ def _parse_args() -> argparse.Namespace:  # pragma: no cover
         "--no-crypto", action="store_true",
         help="Exclude BTCUSD from TSMOM/TSH/vol-BH portfolios.",
     )
+    parser.add_argument(
+        "--label", default=None,
+        help="Optional human-readable tag stored in experiment_runs.run_label "
+             "(e.g. 'total-return / fix dividends') to distinguish this run.",
+    )
     return parser.parse_args()
 
 
@@ -445,7 +453,9 @@ def main() -> None:  # pragma: no cover
         mode="expanding",
     )
     rows_by_symbol = _load_rows_from_bq(args.project)
-    wf = run_walk_forward(rows_by_symbol, cfg, with_crypto=not args.no_crypto)
+    wf = run_walk_forward(
+        rows_by_symbol, cfg, with_crypto=not args.no_crypto, run_label=args.label,
+    )
     _print_results(wf)
 
     if not args.dry_run:
