@@ -496,11 +496,13 @@ class TestFoldDateAlignment:
         )
 
     def test_experiment_runs_json_discriminator(self):
-        """TSMOM params lack 'strategy' key; baseline params carry it."""
+        """Every strategy's params carry a 'strategy' key naming it."""
         import json
 
-        # TSMOM seed v1 params.
+        # TSMOM seed v1 params (self-identifying via the 'strategy' key, same as
+        # the baselines — the row no longer relies on the key's *absence*).
         tsmom_json = json.dumps({
+            "strategy": "tsmom",
             "formation_horizon": 52,
             "vol_target": 0.10,
             "vol_lookback": 26,
@@ -509,9 +511,11 @@ class TestFoldDateAlignment:
         vbh_json = json.dumps({"strategy": "vol_bh", "vol_target": 0.10})
         passive_json = json.dumps({"strategy": "60_40"})
 
-        assert "strategy" not in json.loads(tsmom_json)
-        for bline_json in (tsh_json, vbh_json, passive_json):
-            assert "strategy" in json.loads(bline_json)
+        names = {
+            json.loads(j)["strategy"]
+            for j in (tsmom_json, tsh_json, vbh_json, passive_json)
+        }
+        assert names == {"tsmom", "tsh", "vol_bh", "60_40"}
 
 
 # ── TestGateStat ──────────────────────────────────────────────────────────────

@@ -339,6 +339,7 @@ def run_walk_forward(
 
         result_rows.append(_build_row(
             json.dumps({
+                "strategy": "tsmom",
                 "formation_horizon": TSMOM_V1.formation_horizon,
                 "vol_target": TSMOM_V1.vol_target,
                 "vol_lookback": TSMOM_V1.vol_lookback,
