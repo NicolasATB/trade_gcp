@@ -29,6 +29,7 @@ Key design decisions
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timezone
 from typing import Any
@@ -132,6 +133,10 @@ def _parse_signal_row(row: dict) -> dict | None:
     if trigger_params is missing required keys (e.g. legacy rows).
     """
     tp = row.get("trigger_params") or {}
+    # A BigQuery JSON column comes back from ReadFromBigQuery as a serialised
+    # string, not a parsed dict — decode it before field access.
+    if isinstance(tp, str):
+        tp = json.loads(tp) if tp else {}
     sign = tp.get("signal")
     vol = tp.get("realized_vol_26w")
     if sign is None:
@@ -165,7 +170,13 @@ class _BuildPortfolioWeightsFn(beam.DoFn):
         self._strategy_id = strategy_id
 
     def process(self, element):
-        week_start, signal_rows = element
+        # The group key is the week_start ISO string, not a date object: Beam's
+        # deterministic coder for GroupByKey cannot encode datetime.date (it defines
+        # __getstate__ but not __setstate__), while an ISO string is trivially stable.
+        # Normalise to the ISO string so the output is stable whether the key
+        # arrives as a string (the pipeline) or a date (direct unit-test calls).
+        week_key, signal_rows = element
+        week_start_iso = week_key.isoformat() if isinstance(week_key, date) else str(week_key)
         rows = [_parse_signal_row(r) for r in signal_rows]
         rows = [r for r in rows if r is not None]
 
@@ -183,7 +194,7 @@ class _BuildPortfolioWeightsFn(beam.DoFn):
             )
             for symbol, weight in weights.items():
                 yield {
-                    "week_start":     week_start.isoformat(),
+                    "week_start":     week_start_iso,
                     "strategy_id":    self._strategy_id,
                     "symbol":         symbol,
                     "include_crypto": include_crypto,
@@ -259,7 +270,7 @@ def run_portfolio_weights(config: dict) -> None:  # pragma: no cover
             )
             | "KeyByWeek" >> beam.Map(
                 lambda row: (
-                    _signal_start_to_week_start(row["signal_start"]),
+                    _signal_start_to_week_start(row["signal_start"]).isoformat(),
                     row,
                 )
             )

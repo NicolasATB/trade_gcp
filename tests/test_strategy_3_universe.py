@@ -26,7 +26,7 @@ class TestFrozenUniverse:
 
     def test_expected_symbols(self):
         symbols = {i.symbol for i in FULL_UNIVERSE}
-        assert symbols == {"SPY", "EFA", "IEF", "TLT", "GLD", "DBC", "UUP", "FXY", "BTC"}
+        assert symbols == {"SPY", "EFA", "IEF", "TLT", "GLD", "DBC", "UUP", "FXY", "BTCUSD"}
 
     def test_five_asset_classes(self):
         assert {i.asset_class for i in FULL_UNIVERSE} == {
@@ -71,7 +71,10 @@ class TestEtfMembers:
 class TestCryptoSleeve:
     def test_btc_is_tier_b_crypto(self):
         (btc,) = CRYPTO_UNIVERSE
-        assert btc.symbol == "BTC"
+        # Canonical symbol is "BTCUSD" to match vw_asset_returns_weekly (the BTC
+        # bronze branch projects a literal 'BTCUSD'); "BTC" would be silently
+        # dropped by the signal stage's symbol filter.
+        assert btc.symbol == "BTCUSD"
         assert btc.asset_class == "crypto"
         assert btc.tier == TIER_B
 

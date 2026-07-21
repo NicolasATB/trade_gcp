@@ -23,7 +23,7 @@ import json
 import math
 import statistics
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from backtest.baselines import (
@@ -34,6 +34,7 @@ from backtest.baselines import (
 )
 from backtest.engine import BacktestResult, run_backtest
 from backtest.metrics import (
+    annualized_return,
     annualized_sharpe,
     annualized_sortino,
     calmar_ratio,
@@ -60,6 +61,8 @@ PORTFOLIO_V1 = PortfolioParams(scheme=Scheme.INVERSE_VOL, crypto_cap=0.20)
 COST_MULTIPLIERS: list[float] = [1.0, 1.5, 2.0]
 
 GATE_THRESHOLD: float = 1.64  # one-sided α=0.10, pre-committed
+GATE_MAX_LAG: int = 52        # Newey-West Bartlett lag L (= formation horizon)
+GATE_COST_MULT: float = 1.0   # gate is evaluated at the base cost only
 
 BQ_TABLE: str = "prod_trade_strategy.experiment_runs"
 
@@ -165,19 +168,28 @@ def _build_row(
     cost_mult: float,
     fold_net_returns: list[list[float]],
     n_cv_folds: int,
+    run_label: str | None = None,
+    gate: dict | None = None,
 ) -> dict:
-    """Build one experiment_runs row from aggregated fold results."""
+    """Build one experiment_runs row from aggregated fold results.
+
+    ``gate`` is the pre-committed TSMOM-vs-TSH decision stat and its audit
+    fields; it is a per-run scalar, so it is attached to exactly one row (the
+    TSMOM row at the base cost) and left NULL on every other row.
+    """
     sharpes = [annualized_sharpe(r) for r in fold_net_returns]
     sortinos = [annualized_sortino(r) for r in fold_net_returns]
     max_dds = [max_drawdown(r) for r in fold_net_returns]
     calmars = [calmar_ratio(r) for r in fold_net_returns]
+    ann_returns = [annualized_return(r) for r in fold_net_returns]
 
     def _mean(xs: list[float]) -> float:
         return statistics.mean(xs) if xs else 0.0
 
     return {
         "experiment_run_id": str(uuid.uuid4()),
-        "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "run_label": run_label,
         "tsmom_params_json": tsmom_params_json,
         "portfolio_params_json": portfolio_params_json,
         "cost_multiplier": cost_mult,
@@ -186,6 +198,7 @@ def _build_row(
         "cv_sortino_net": _mean(sortinos),
         "cv_max_dd": _mean(max_dds),
         "cv_calmar": _mean(calmars),
+        "cv_ann_return_net": _mean(ann_returns),
         # dsr / hlz_tstat: both NULL in T-26 — deferred to T-27.
         # Both are multiple-testing corrections requiring the full trial grid.
         # With 1 TSMOM trial in T-26, Var(SR)=0 → DSR degenerate; and HLZ
@@ -197,6 +210,15 @@ def _build_row(
         "holdout_spent": False,
         "holdout_sharpe_net": None,
         "promoted": False,
+        # Gate stat (per run, on the TSMOM base-cost row only; NULL elsewhere).
+        # δ_t = tsmom_net − tsh_net, paired weekly; Newey-West HAC t-stat.
+        "gate_mean_delta": (gate or {}).get("mean_delta"),
+        "gate_t_hac": (gate or {}).get("t_hac"),
+        "gate_pass": (gate or {}).get("pass"),
+        "gate_n_obs": (gate or {}).get("n_obs"),
+        "gate_max_lag": (gate or {}).get("max_lag"),
+        "gate_threshold": (gate or {}).get("threshold"),
+        "gate_cost_multiplier": (gate or {}).get("cost_multiplier"),
     }
 
 
@@ -208,6 +230,7 @@ def run_walk_forward(
     cfg: WalkForwardConfig,
     *,
     with_crypto: bool,
+    run_label: str | None = None,
 ) -> dict[str, Any]:
     """Run walk-forward for all trials.
 
@@ -293,6 +316,23 @@ def run_walk_forward(
         "crypto_cap": PORTFOLIO_V1.crypto_cap,
     })
 
+    # Gate stat at the base cost (GATE_COST_MULT): pool all test-week net returns
+    # and run the paired TSMOM−TSH Newey-West test.  Computed here (before the
+    # rows) so its scalars + audit fields can be persisted on the TSMOM base-cost
+    # row.  n_obs is the pooled test-week count (audit trail for the t-stat).
+    tsmom_pooled = [r for fold in fold_bucket[GATE_COST_MULT]["tsmom"] for r in fold.net_returns]
+    tsh_pooled = [r for fold in fold_bucket[GATE_COST_MULT]["tsh"] for r in fold.net_returns]
+    mean_d, t_stat_hac = compute_gate_stat(tsmom_pooled, tsh_pooled, max_lag=GATE_MAX_LAG)
+    gate = {
+        "mean_delta": mean_d,
+        "t_hac": t_stat_hac,
+        "pass": t_stat_hac > GATE_THRESHOLD,
+        "n_obs": len(tsmom_pooled),
+        "max_lag": GATE_MAX_LAG,
+        "threshold": GATE_THRESHOLD,
+        "cost_multiplier": GATE_COST_MULT,
+    }
+
     result_rows: list[dict] = []
     for cm in COST_MULTIPLIERS:
         tsmom_net = [r.net_returns for r in fold_bucket[cm]["tsmom"]]
@@ -302,36 +342,35 @@ def run_walk_forward(
 
         result_rows.append(_build_row(
             json.dumps({
+                "strategy": "tsmom",
                 "formation_horizon": TSMOM_V1.formation_horizon,
                 "vol_target": TSMOM_V1.vol_target,
                 "vol_lookback": TSMOM_V1.vol_lookback,
                 "periods_per_year": TSMOM_V1.periods_per_year,
             }),
-            portfolio_json, cm, tsmom_net, n_completed_folds,
+            portfolio_json, cm, tsmom_net, n_completed_folds, run_label=run_label,
+            # Attach the per-run gate to exactly the TSMOM base-cost row.
+            gate=gate if cm == GATE_COST_MULT else None,
         ))
         result_rows.append(_build_row(
             json.dumps({"strategy": "tsh", "vol_target": TSMOM_V1.vol_target}),
-            portfolio_json, cm, tsh_net, n_completed_folds,
+            portfolio_json, cm, tsh_net, n_completed_folds, run_label=run_label,
         ))
         result_rows.append(_build_row(
             json.dumps({"strategy": "vol_bh", "vol_target": TSMOM_V1.vol_target}),
-            portfolio_json, cm, vbh_net, n_completed_folds,
+            portfolio_json, cm, vbh_net, n_completed_folds, run_label=run_label,
         ))
         result_rows.append(_build_row(
             json.dumps({"strategy": "60_40"}),
             json.dumps({"weights": PASSIVE_WEIGHTS}),
-            cm, pas_net, n_completed_folds,
+            cm, pas_net, n_completed_folds, run_label=run_label,
         ))
-
-    # Gate stat at base cost (1.0): pool all test-week net returns.
-    tsmom_pooled = [r for fold in fold_bucket[1.0]["tsmom"] for r in fold.net_returns]
-    tsh_pooled = [r for fold in fold_bucket[1.0]["tsh"] for r in fold.net_returns]
-    mean_d, t_stat_hac = compute_gate_stat(tsmom_pooled, tsh_pooled)
 
     return {
         "rows": result_rows,
         "gate_mean_delta": mean_d,
         "gate_t_stat_hac": t_stat_hac,
+        "gate_n_obs": len(tsmom_pooled),
         "fold_bucket": fold_bucket,
         "n_folds": n_completed_folds,
     }
@@ -341,23 +380,26 @@ def _print_results(wf: dict[str, Any]) -> None:  # pragma: no cover
     """Print walk-forward summary table to stdout."""
     rows = wf["rows"]
     print("\nExperiment Results")
-    print("-" * 75)
-    print(f"{'Strategy':<12} {'CostMult':>8} {'CV Sharpe':>10} {'CV Sortino':>11} {'CV MaxDD':>9} {'CV Calmar':>10}")
-    print("-" * 75)
+    print("-" * 88)
+    print(f"{'Strategy':<12} {'CostMult':>8} {'CV Sharpe':>10} {'CV Sortino':>11} {'CV MaxDD':>9} {'CV Calmar':>10} {'AnnRet%':>9}")
+    print("-" * 88)
     for row in rows:
         strat = json.loads(row["tsmom_params_json"]).get("strategy", "tsmom")
         print(
             f"{strat:<12} {row['cost_multiplier']:>8.1f} "
             f"{row['cv_sharpe_net']:>10.3f} {row['cv_sortino_net']:>11.3f} "
-            f"{row['cv_max_dd']:>9.3f} {row['cv_calmar']:>10.3f}"
+            f"{row['cv_max_dd']:>9.3f} {row['cv_calmar']:>10.3f} "
+            f"{row['cv_ann_return_net'] * 100:>9.2f}"
         )
-    print("-" * 75)
+    print("-" * 88)
     mean_d = wf["gate_mean_delta"]
     t_hac = wf["gate_t_stat_hac"]
-    gate_pass = "PASS ✓" if t_hac > GATE_THRESHOLD else "FAIL ✗"
+    gate_pass = "PASS" if t_hac > GATE_THRESHOLD else "FAIL"
+    # ASCII-only output: Windows consoles default to cp1252, which cannot
+    # encode characters like the Greek delta.
     print(
-        f"\nGate (TSMOM vs TSH, cost×1.0): "
-        f"mean_δ={mean_d:.5f}  t_HAC={t_hac:.3f}  "
+        f"\nGate (TSMOM vs TSH, cost x1.0): "
+        f"mean_delta={mean_d:.5f}  t_HAC={t_hac:.3f}  "
         f"threshold={GATE_THRESHOLD}  [{gate_pass}]"
     )
     print(f"Pooled obs: {sum(len(r.net_returns) for r in wf['fold_bucket'][1.0]['tsmom'])}")
@@ -377,6 +419,10 @@ def _load_rows_from_bq(project: str) -> dict[str, list[dict]]:  # pragma: no cov
             excess_log_return, excess_return, simple_return, realized_vol_26w
         FROM `{project}.prod_trade_silver.vw_asset_returns_weekly`
         WHERE week_start < '{HOLDOUT_START}'
+          -- Each symbol's first week has NULL returns (LAG has no prior row);
+          -- the engine contract forbids non-finite values inside a formation
+          -- window (gaps are handled upstream), so exclude them at the loader.
+          AND excess_log_return IS NOT NULL
         ORDER BY symbol, week_start
     """
     rows_by_symbol: dict[str, list[dict]] = {}
@@ -397,9 +443,18 @@ def _insert_rows_to_bq(project: str, rows: list[dict]) -> None:  # pragma: no co
 
     client = bigquery.Client(project=project)
     table_ref = f"{project}.{BQ_TABLE}"
-    errors = client.insert_rows_json(table_ref, rows)
-    if errors:
-        raise RuntimeError(f"BQ streaming insert errors: {errors}")
+    # Batch load job, not insert_rows_json: streaming inserts 404 on freshly
+    # created tables (metadata propagation) and leave rows in the streaming
+    # buffer; a load job is atomic and buffer-free (project convention:
+    # batch loads over streaming inserts).
+    job = client.load_table_from_json(
+        rows,
+        table_ref,
+        job_config=bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        ),
+    )
+    job.result()
     print(f"Inserted {len(rows)} rows into {table_ref}")
 
 
@@ -417,6 +472,11 @@ def _parse_args() -> argparse.Namespace:  # pragma: no cover
         "--no-crypto", action="store_true",
         help="Exclude BTCUSD from TSMOM/TSH/vol-BH portfolios.",
     )
+    parser.add_argument(
+        "--label", default=None,
+        help="Optional human-readable tag stored in experiment_runs.run_label "
+             "(e.g. 'total-return / fix dividends') to distinguish this run.",
+    )
     return parser.parse_args()
 
 
@@ -430,7 +490,9 @@ def main() -> None:  # pragma: no cover
         mode="expanding",
     )
     rows_by_symbol = _load_rows_from_bq(args.project)
-    wf = run_walk_forward(rows_by_symbol, cfg, with_crypto=not args.no_crypto)
+    wf = run_walk_forward(
+        rows_by_symbol, cfg, with_crypto=not args.no_crypto, run_label=args.label,
+    )
     _print_results(wf)
 
     if not args.dry_run:

@@ -66,9 +66,13 @@ ETF_UNIVERSE: tuple[Instrument, ...] = (
 
 # BTC crypto sleeve (Tier B). Sourced by the existing spot ingest, not the ETF
 # providers, so it carries no Yahoo/Tiingo ticker; included here so the universe
-# and the coverage gate see the full nine instruments in one place.
+# and the coverage gate see the full nine instruments in one place. The canonical
+# symbol is "BTCUSD" (not "BTC") to match what the silver consolidation projects
+# (the BTC bronze branch emits a literal 'BTCUSD') and what vw_asset_returns_weekly
+# and the backtest's SYMBOL_CLASS use — otherwise the TSMOM signal stage's
+# `symbol IN (...)` filter would silently drop the crypto sleeve.
 CRYPTO_UNIVERSE: tuple[Instrument, ...] = (
-    Instrument("BTC", "crypto", TIER_B, date(2011, 8, 18)),
+    Instrument("BTCUSD", "crypto", TIER_B, date(2011, 8, 18)),
 )
 
 FULL_UNIVERSE: tuple[Instrument, ...] = ETF_UNIVERSE + CRYPTO_UNIVERSE

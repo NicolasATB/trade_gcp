@@ -59,6 +59,36 @@ documented as is. The prior is low (everything directional in this program died 
 scrutiny: McLean-Pontiff 2016, Harvey-Liu-Zhu 2016). Low prior ≠ not worth testing.
 For the project's real purpose, the test *is* the product.
 
+### Why TSMOM v1 first, XTSMOM as a separate epic
+
+If XTSMOM is the only clean survivor, why is v1 diagonal TSMOM? Four reasons, in
+order of weight:
+
+1. **TSMOM is the control XTSMOM needs to be interpretable.** Pitkäjärvi et al.'s
+   central claim is *relative*: per-instrument TSMOM alpha disappears once you control
+   for XTSMOM. Replicating that post-2016 requires our own measured diagonal TSMOM on
+   the same universe and period first — TSMOM v1 is not a detour, it is the
+   experiment's denominator.
+2. **De-risk the apparatus on the simplest possible strategy.** Diagonal TSMOM has one
+   real parameter (formation horizon) and trivial mechanics, so it exercises everything
+   else — multi-asset ingest, weekly resample, vol scaling, costs, purged walk-forward,
+   DSR/PBO — with minimal strategy-side complexity. This already paid off: the engine's
+   look-ahead bug (w(t) paired with r(t) instead of r(t+1)) was caught under the simple
+   strategy, before it could contaminate a far more expensive XTSMOM run.
+3. **Trial budget and multiplicity.** XTSMOM opens a much larger parameter space (which
+   class predicts which, at what lag and horizon). Mixing both into one campaign would
+   burn the pre-committed 10–15-trial budget and confound attribution between own-asset
+   momentum, the cross-asset channel, and vol scaling.
+4. **Holdout economics.** The blind holdout is a one-way door; spending it on XTSMOM
+   with an unproven apparatus would bet the project's scarcest asset on the first run.
+   The sequence spends v1's holdout on the cheap strategy and leaves XTSMOM its own
+   validation route, designed on a debugged apparatus (the train/holdout boundary was
+   fixed with that future epic in mind — see `backtest/splitter.py`).
+
+A minor fifth factor: the correlation flip lowers XTSMOM's prior in the current regime,
+so buying the cheap information first (does TSMOM ≠ TSH on this universe?) before the
+expensive test is simply good experiment ordering.
+
 ---
 
 ## Data sources per class
@@ -69,12 +99,13 @@ source, Tiingo as a competing fallback. Crypto reuses the existing spot ingest
 
 Futures are more cost-accurate but carry roll/contango and the point-in-time
 active-contract hygiene a v1 pipeline doesn't need. ETFs are simple and continuous; the
-conformed close is **split-adjusted but not dividend-adjusted** (a price-return level, not
-total-return) — enough to exercise the multi-asset pipeline.
+conformed close is a clean **split-adjusted** price level, and the weekly return layer
+(`vw_asset_returns_weekly`) reinvests split-adjusted cash dividends to form a
+**total-return** series (T-26b) — enough to exercise the multi-asset pipeline.
 
 | Asset class | Instrument (v1) | Source (primary / fallback) | Avoids roll? | Trade-off / rationale |
 |---|---|---|---|---|
-| Equity indices | ETF (e.g. SPY / EFA / EEM) | Yahoo / Tiingo | Yes | Liquid proxy; close is split-adjusted price-return (not dividend-adjusted); futures add roll + active-contract tracking for no v1 gain. |
+| Equity indices | ETF (e.g. SPY / EFA / EEM) | Yahoo / Tiingo | Yes | Liquid proxy; split-adjusted close + reinvested dividends = total-return (T-26b); futures add roll + active-contract tracking for no v1 gain. |
 | Gov. bonds | Treasury ETF (e.g. SHY / IEF / TLT) | Yahoo / Tiingo | Yes | Continuous split-adjusted level without managing the roll calendar / cheapest-to-deliver. |
 | Commodities | Physical (GLD) / broad ETF (e.g. DBC) | Yahoo / Tiingo | Partially | "No-roll" holds only for physically-backed ETFs; broad commodity ETFs are futures wrappers — roll/contango is **embedded in NAV**, not eliminated (a cost v1 does not isolate). |
 | FX | Currency ETF (e.g. UUP / FXE / FXY) | Yahoo / Tiingo | N/A | Thinner, embeds money-market carry + expense ratio vs spot/forwards; acceptable as a v1 directional proxy. |
@@ -98,8 +129,16 @@ total-return) — enough to exercise the multi-asset pipeline.
   (`adj_close = raw_close / Π(split_factor where ex_date > D)`), an **auditable silver step**
   applied before the priority de-dup in `conform` — proven on EFA (divergence collapsed from
   avg 10.1% / max 69% to avg 0.004%). T-21 stores Tiingo's `split_factor` / `div_cash` in bronze
-  (raw provider fields) to drive it. Neither source is dividend-adjusted, so the series is
-  **price-return, not total-return** — a documented v1 limitation.
+  (raw provider fields) to drive it.
+- **T-26b closes the total-return gap.** `vw_asset_returns_weekly` now adds each week's cash
+  dividends back to the price return: dividends are sourced from Tiingo's `div_cash` (Yahoo's
+  chart quote carries none, so they come from Tiingo even on weeks whose price came from Yahoo)
+  and split-adjusted with the **same** factor `conform` applies to the close, so dividend and
+  price share one basis. The exported `simple_return` / `excess_return` are total-return;
+  `price_simple_return` / `price_log_return` keep the dividend-free level for audit and for the
+  price-vs-total bias comparison. This matters because the baselines lean on high-dividend
+  assets (TSH favours bonds + SPY; 60/40 holds 40% bonds), so a price-return series understated
+  them and inflated TSMOM's edge over TSH/60-40.
 - **Per-instrument registration landed in T-20** (the bronze ingest ticket), alongside
   the bronze tables: Yahoo (`source_id` 16, priority 2) and Tiingo (17, priority 1) are
   seeded in `sql/DDL.sql`, competing in the silver consolidation — no orphan
@@ -573,14 +612,49 @@ correct. `dsr=NULL`, `hlz_tstat=NULL` in all T-26 `experiment_runs` rows.
 
 ### Results
 
-| Strategy | Cost mult | CV Sharpe (net) | CV Sortino | Gate t-stat (HAC) |
-|---|---|---|---|---|
-| TSMOM seed v1 | 1.0 | — | — | — |
-| TSH | 1.0 | — | — | (ref) |
-| Vol-BH | 1.0 | — | — | — |
-| 60/40 passive | 1.0 | — | — | — |
+> Run 2026-07-20 (**total-return**, `run_label = 'total-return / fix dividends'`) —
+> engine under the `w(t) × r(t+1)` timing contract, 5 expanding folds (min_train
+> 104w, purge 3w, embargo 2w), 1,343 pooled test weeks. 12 rows written to
+> `experiment_runs` (`dsr` / `pbo` / `hlz_tstat` NULL — deferred to T-27;
+> `holdout_spent = FALSE` on every row). The earlier price-return run
+> (2026-07-17, `run_label = 'price-return baseline (T-26)'`) is retained in
+> `experiment_runs` for the before/after comparison.
 
-*Fill after running `python -m research.run_experiments --project trade-390514`.*
+| Strategy | Cost mult | CV Sharpe (net) | CV Sortino | Ann. ret (net) | Gate t-stat (HAC) |
+|---|---|---|---|---|---|
+| TSMOM seed v1 | 1.0 | 0.615 | 0.952 | 5.91% | **0.384 — FAIL** |
+| TSH | 1.0 | 0.582 | 0.832 | 4.86% | (ref) |
+| Vol-BH | 1.0 | 0.780 | 1.129 | 5.81% | — |
+| 60/40 passive | 1.0 | 0.622 | 0.897 | 6.81% | — |
+
+Cost sensitivity (net CV Sharpe at ×1.0 / ×1.5 / ×2.0): TSMOM 0.615 / 0.573 / 0.532;
+TSH 0.582 / 0.573 / 0.563; vol-BH 0.780 / 0.769 / 0.757; 60/40 0.622 / 0.621 / 0.620.
+
+*Ann. ret (net)* is the geometric annualized excess return, net of costs — the exact per-fold
+mean (`cv_ann_return_net`, T-26b). **The raw returns are compressed (4.9–6.8%) and do not
+separate the strategies; the differentiator is efficiency, not level.** Read with the risk
+basis: TSMOM/TSH/vol-BH are vol-scaled to ~10%, while 60/40 runs at its natural (higher) vol, so
+its 6.81% carries the worst drawdown (−24%) and a middling Sharpe. **vol-BH earns essentially the
+same return as TSMOM (5.81% vs 5.91%) at a far better Sharpe (0.780 vs 0.615)** — the vol scaling,
+not the momentum signal, does the work; TSMOM takes more risk for no return premium.
+
+**Reading (gate only — the verdict belongs to T-27/T-28):**
+
+- **Gate FAILS:** `mean_δ = 0.00021`/week, `t_HAC = 0.384 < 1.64` (Newey-West,
+  L=52). On total-return the 52-week formation adds **no** measurable signal over the
+  historical-mean direction — the Huang et al. (2020) equivalence to TSH is **not
+  rejected** at the pre-committed one-sided α = 0.10. Under the pre-committed decision
+  rule, TSMOM v1 does not clear the baseline.
+- **What changed vs the price-return run.** The prior run (2026-07-17) passed the gate
+  (`t_HAC = 2.309`) only because the price-return series understated the
+  dividend-paying baselines: TSH's CV Sharpe rose from **−0.144 to +0.582** once
+  dividends were added (TSH is long bonds + SPY), and the TSMOM-vs-TSH gap collapsed
+  (`mean_δ` 0.00171 → 0.00021). **The apparent edge was largely a dividend-accounting
+  artifact** — exactly the bias the T-26b total-return fix was built to remove, caught
+  before the holdout was spent.
+- **Corroborating flag:** vol-BH's CV Sharpe (0.780) is the highest of the four and
+  exceeds TSMOM's (0.615) — consistent with Kim et al. (2016): in a net-long sample
+  vol scaling, not the momentum sign, does the work.
 
 ---
 

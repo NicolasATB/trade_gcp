@@ -665,52 +665,92 @@ FROM scaled;
 -- prod_trade_silver — multi-asset weekly returns / excess returns / realized vol
 -- (Strategy 3 TSMOM feature layer, T-21). Pure view over silver.ohlcv_validated
 -- (temporality='1w', one row per symbol/week, Monday→Sunday) joined point-in-time
--- to the risk-free rate. Excess return uses FRED DFF (effective fed funds, NOT
--- revised → as-of obs_date, no vintage). The level is split-adjusted price-return
--- (conform reconciles Tiingo to Yahoo's split-only basis), NOT total-return.
--- Annualisation is a uniform ×√52 across all assets (sidesteps the 252-vs-365
--- trading-calendar split between ETFs and BTC). T-22 (TSMOM) cumulates the weekly
--- excess returns over its formation horizon and scales by realized_vol_26w.
+-- to the risk-free rate and to Tiingo's cash dividends. Excess return uses FRED
+-- DFF (effective fed funds, NOT revised → as-of obs_date, no vintage). The level
+-- is split-adjusted TOTAL-return: the price is split-adjusted (conform reconciles
+-- Tiingo to Yahoo's split-only basis) and reinvested cash dividends are added back
+-- (T-26b). Annualisation is a uniform ×√52 across all assets (sidesteps the
+-- 252-vs-365 trading-calendar split between ETFs and BTC). T-22 (TSMOM) cumulates
+-- the weekly excess returns over its formation horizon and scales by
+-- realized_vol_26w. price_* columns keep the dividend-free price-return for audit.
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `trade-390514.prod_trade_silver.vw_asset_returns_weekly`
-OPTIONS(description = "Weekly (Monday→Sunday) per-symbol returns for the Strategy-3 universe — the TSMOM feature layer (T-21). Columns: symbol, week_start (the week's Monday), price_close, simple_return (P_t/P_{t-1}-1), log_return (ln P_t/P_{t-1}), dff_annual_pct (effective fed funds %, FRED DFF point-in-time: latest obs on/before week_start; DFF is not revised so no vintage), rf_week ((1+DFF/100)^(7/365)-1), excess_return (simple_return - rf_week), excess_log_return (log_return - ln(1+rf_week)), realized_vol_26w (stddev of the last 26 weekly log-returns × √52; NULL during the 26-week warm-up, same NULL contract as the RSI). Annualisation is a uniform ×√52 across all assets. Prices are split-adjusted price-return (conform reconciles Tiingo to Yahoo's split-only basis), NOT total-return. Built on silver.ohlcv_validated (1w) + bronze.fred_dff_daily_raw.")
+OPTIONS(description = "Weekly (Monday→Sunday) per-symbol TOTAL returns for the Strategy-3 universe — the TSMOM feature layer (T-21, dividends added T-26b). Columns: symbol, week_start (the week's Monday), price_close (split-adjusted), div_adj (split-adjusted cash dividends with ex-date in the week; 0 when none — BTC always, ETFs when Tiingo has none), price_simple_return / price_log_return (dividend-FREE price-return, kept for audit / bias comparison), simple_return ((P_t+D_t)/P_{t-1}-1, total-return), log_return (ln((P_t+D_t)/P_{t-1})), dff_annual_pct (effective fed funds %, FRED DFF point-in-time: latest obs on/before week_start; DFF is not revised so no vintage), rf_week ((1+DFF/100)^(7/365)-1), excess_return (simple_return - rf_week), excess_log_return (log_return - ln(1+rf_week)), realized_vol_26w (stddev of the last 26 weekly total-return log-returns × √52; NULL during the 26-week warm-up, same NULL contract as the RSI). Annualisation is a uniform ×√52 across all assets. Dividends come from bronze.tiingo_etf_daily_raw (the only source carrying divCash; Yahoo has none), split-adjusted with the SAME factor conform applies to the Tiingo close (T-21) so dividend and price share one split basis. Built on silver.ohlcv_validated (1w) + bronze.fred_dff_daily_raw + bronze.tiingo_etf_daily_raw.")
 AS
 WITH wk AS (
   SELECT symbol, DATE(time_period_start) AS week_start, price_close
   FROM `trade-390514.prod_trade_silver.ohlcv_validated`
   WHERE temporality = '1w' AND price_close IS NOT NULL
 ),
+-- Cash dividends, split-adjusted to the same basis as the silver price. Only
+-- Tiingo carries divCash (Yahoo's chart quote does not), so dividends are sourced
+-- from Tiingo bronze even on weeks whose price came from Yahoo. Each ex-date's raw
+-- div_cash is divided by f = product of split_factors whose ex-date is AFTER it —
+-- the SAME back-adjustment conform applies to the Tiingo close (T-21) — so both
+-- share one split-adjusted basis. div_daily is per ex-date; div_wk buckets it into
+-- the Monday→Sunday week of the ex-date.
+div_daily AS (
+  SELECT
+    t.symbol, t.candle_date,
+    t.div_cash / IFNULL(EXP((
+      SELECT SUM(LN(s.split_factor))
+      FROM `trade-390514.prod_trade_bronze.tiingo_etf_daily_raw` AS s
+      WHERE s.symbol = t.symbol AND s.candle_date > t.candle_date
+        AND s.split_factor IS NOT NULL AND s.split_factor != 1.0
+    )), 1.0) AS div_adj
+  FROM `trade-390514.prod_trade_bronze.tiingo_etf_daily_raw` AS t
+  WHERE t.div_cash IS NOT NULL AND t.div_cash > 0
+),
+div_wk AS (
+  SELECT symbol, DATE_TRUNC(candle_date, WEEK(MONDAY)) AS week_start, SUM(div_adj) AS div_adj
+  FROM div_daily
+  GROUP BY symbol, week_start
+),
 rets AS (
   SELECT
-    symbol, week_start, price_close,
-    SAFE_DIVIDE(price_close, LAG(price_close) OVER w) - 1 AS simple_return,
-    LN(SAFE_DIVIDE(price_close, LAG(price_close) OVER w))  AS log_return,
-    ROW_NUMBER() OVER w - 1                                AS i
-  FROM wk
-  WINDOW w AS (PARTITION BY symbol ORDER BY week_start)
+    w.symbol, w.week_start, w.price_close,
+    IFNULL(d.div_adj, 0)             AS div_adj,
+    LAG(w.price_close) OVER win      AS prev_close,
+    ROW_NUMBER() OVER win - 1        AS i
+  FROM wk w
+  LEFT JOIN div_wk d USING (symbol, week_start)
+  WINDOW win AS (PARTITION BY w.symbol ORDER BY w.week_start)
+),
+tr AS (
+  SELECT
+    symbol, week_start, price_close, div_adj, i,
+    -- Dividend-free price-return (audit / bias comparison against total-return).
+    SAFE_DIVIDE(price_close, prev_close) - 1              AS price_simple_return,
+    LN(SAFE_DIVIDE(price_close, prev_close))              AS price_log_return,
+    -- Total-return: reinvest the week's dividend at the prior week's close.
+    SAFE_DIVIDE(price_close + div_adj, prev_close) - 1    AS simple_return,
+    LN(SAFE_DIVIDE(price_close + div_adj, prev_close))    AS log_return
+  FROM rets
 ),
 -- Risk-free point-in-time: the latest DFF observation on/before the week's Monday.
 -- DFF is not revised, so the as-of obs_date IS the vintage. The 1990-01-01 floor
 -- only bounds the scan (earliest ETF is SPY 1993); DFF history starts 1954.
 rf AS (
-  SELECT r.symbol, r.week_start, d.obs_value AS dff_annual_pct
-  FROM rets r
+  SELECT t.symbol, t.week_start, d.obs_value AS dff_annual_pct
+  FROM tr t
   LEFT JOIN `trade-390514.prod_trade_bronze.fred_dff_daily_raw` d
-    ON d.obs_date <= r.week_start AND d.obs_date >= '1990-01-01'
-  QUALIFY ROW_NUMBER() OVER (PARTITION BY r.symbol, r.week_start ORDER BY d.obs_date DESC) = 1
+    ON d.obs_date <= t.week_start AND d.obs_date >= '1990-01-01'
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY t.symbol, t.week_start ORDER BY d.obs_date DESC) = 1
 )
 SELECT
-  r.symbol, r.week_start, r.price_close, r.simple_return, r.log_return,
+  t.symbol, t.week_start, t.price_close, t.div_adj,
+  t.price_simple_return, t.price_log_return,
+  t.simple_return, t.log_return,
   rf.dff_annual_pct,
   POW(1 + rf.dff_annual_pct / 100, 7 / 365) - 1                                  AS rf_week,
-  r.simple_return - (POW(1 + rf.dff_annual_pct / 100, 7 / 365) - 1)              AS excess_return,
-  r.log_return    - LN(POW(1 + rf.dff_annual_pct / 100, 7 / 365))               AS excess_log_return,
-  IF(r.i >= 26,
-     STDDEV_SAMP(r.log_return) OVER (
-       PARTITION BY r.symbol ORDER BY r.week_start ROWS BETWEEN 25 PRECEDING AND CURRENT ROW
+  t.simple_return - (POW(1 + rf.dff_annual_pct / 100, 7 / 365) - 1)              AS excess_return,
+  t.log_return    - LN(POW(1 + rf.dff_annual_pct / 100, 7 / 365))               AS excess_log_return,
+  IF(t.i >= 26,
+     STDDEV_SAMP(t.log_return) OVER (
+       PARTITION BY t.symbol ORDER BY t.week_start ROWS BETWEEN 25 PRECEDING AND CURRENT ROW
      ) * SQRT(52),
      NULL)                                                                       AS realized_vol_26w
-FROM rets r
+FROM tr t
 LEFT JOIN rf USING (symbol, week_start);
 
 
@@ -1348,6 +1388,7 @@ LEFT JOIN `trade-390514.prod_trade_bronze.coinmetrics_btc_tx_count_daily_raw` AS
 CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.experiment_runs` (
   experiment_run_id     STRING    NOT NULL OPTIONS(description = "UUID for this trial run."),
   created_at            TIMESTAMP NOT NULL OPTIONS(description = "When the trial was executed."),
+  run_label             STRING    OPTIONS(description = "Optional human-readable tag for the run (e.g. 'total-return / fix dividends'), set via run_experiments --label. Distinguishes re-runs beyond created_at; NULL for older rows written before the flag existed."),
   tsmom_params_json     STRING    OPTIONS(description = "JSON-serialised TsmomParams (incl. vol_scaling flag)."),
   portfolio_params_json STRING    OPTIONS(description = "JSON-serialised PortfolioParams (scheme + crypto_cap)."),
   cost_multiplier       FLOAT64   OPTIONS(description = "Sensitivity grid value used (1.0 / 1.5 / 2.0)."),
@@ -1356,6 +1397,7 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.experiment_runs` (
   cv_sortino_net        FLOAT64   OPTIONS(description = "Mean per-fold net Sortino across all CV folds."),
   cv_max_dd             FLOAT64   OPTIONS(description = "Mean per-fold maximum drawdown (≤ 0) across all CV folds."),
   cv_calmar             FLOAT64   OPTIONS(description = "Mean per-fold Calmar ratio across all CV folds."),
+  cv_ann_return_net     FLOAT64   OPTIONS(description = "Mean per-fold geometric annualized net return (excess-return basis, ×52 weekly). E.g. 0.10 = +10%/yr. Same series as cv_sharpe_net."),
   dsr                   FLOAT64   OPTIONS(description = "Deflated Sharpe Ratio (Bailey & López de Prado 2014) over all trial Sharpes at time of evaluation."),
   pbo                   FLOAT64   OPTIONS(description = "Probability of Backtest Overfitting (CSCV, López de Prado 2018) ∈ [0, 1]."),
   hlz_tstat             FLOAT64   OPTIONS(description = "Harvey-Liu-Zhu (2016) t-stat after multiple-testing haircut."),
@@ -1363,6 +1405,15 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.experiment_runs` (
   holdout_spent         BOOL      OPTIONS(description = "TRUE only when T-27 opens the holdout for this run."),
   holdout_sharpe_net    FLOAT64   OPTIONS(description = "Net Sharpe over the holdout window (NULL until T-27 fills it; never NULL after T-27)."),
   promoted              BOOL      OPTIONS(description = "TRUE when this trial's params were promoted to the active strategy_tsmom_multiasset row."),
+  -- Pre-committed gate (TSMOM vs TSH). Per-RUN scalar, so populated on exactly
+  -- one row — the TSMOM row at gate_cost_multiplier — and NULL on every other row.
+  gate_mean_delta       FLOAT64   OPTIONS(description = "Mean weekly δ = tsmom_net − tsh_net, pooled over all test folds at the base cost. The gate's effect size. NULL on non-gate rows."),
+  gate_t_hac            FLOAT64   OPTIONS(description = "Newey-West (Bartlett) HAC t-stat of mean(δ), the pre-committed decision statistic. > gate_threshold ⇒ pass. NULL on non-gate rows."),
+  gate_pass             BOOL      OPTIONS(description = "gate_t_hac > gate_threshold (one-sided). TRUE ⇒ the 52w formation beats the historical-mean direction (TSH). NULL on non-gate rows."),
+  gate_n_obs            INT64     OPTIONS(description = "Pooled test-week count behind the gate stat (audit trail for the t-stat's degrees of freedom). NULL on non-gate rows."),
+  gate_max_lag          INT64     OPTIONS(description = "Bartlett kernel lag cap L used in the HAC variance (= formation horizon, 52). Audit field. NULL on non-gate rows."),
+  gate_threshold        FLOAT64   OPTIONS(description = "Pre-committed one-sided critical value (1.64 = α 0.10). Audit field. NULL on non-gate rows."),
+  gate_cost_multiplier  FLOAT64   OPTIONS(description = "Cost level at which the gate is evaluated (1.0 = base); the 1.5/2.0 grid is sensitivity, not the decision. Identifies which row carries the gate. NULL on non-gate rows."),
   PRIMARY KEY (experiment_run_id) NOT ENFORCED
 )
-OPTIONS(description = "Strategy 3 backtest trial ledger: one row per parameter-combination trial (Epic 8 T-25/T-26/T-27). Writer: research/run_experiments.py (T-26).");
+OPTIONS(description = "Strategy 3 backtest trial ledger: one row per parameter-combination trial (Epic 8 T-25/T-26/T-27). Per-run gate stat (TSMOM vs TSH) persisted on the TSMOM base-cost row (gate_* columns). Writer: research/run_experiments.py (T-26).");
