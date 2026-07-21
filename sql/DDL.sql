@@ -1404,6 +1404,15 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.experiment_runs` (
   holdout_spent         BOOL      OPTIONS(description = "TRUE only when T-27 opens the holdout for this run."),
   holdout_sharpe_net    FLOAT64   OPTIONS(description = "Net Sharpe over the holdout window (NULL until T-27 fills it; never NULL after T-27)."),
   promoted              BOOL      OPTIONS(description = "TRUE when this trial's params were promoted to the active strategy_tsmom_multiasset row."),
+  -- Pre-committed gate (TSMOM vs TSH). Per-RUN scalar, so populated on exactly
+  -- one row — the TSMOM row at gate_cost_multiplier — and NULL on every other row.
+  gate_mean_delta       FLOAT64   OPTIONS(description = "Mean weekly δ = tsmom_net − tsh_net, pooled over all test folds at the base cost. The gate's effect size. NULL on non-gate rows."),
+  gate_t_hac            FLOAT64   OPTIONS(description = "Newey-West (Bartlett) HAC t-stat of mean(δ), the pre-committed decision statistic. > gate_threshold ⇒ pass. NULL on non-gate rows."),
+  gate_pass             BOOL      OPTIONS(description = "gate_t_hac > gate_threshold (one-sided). TRUE ⇒ the 52w formation beats the historical-mean direction (TSH). NULL on non-gate rows."),
+  gate_n_obs            INT64     OPTIONS(description = "Pooled test-week count behind the gate stat (audit trail for the t-stat's degrees of freedom). NULL on non-gate rows."),
+  gate_max_lag          INT64     OPTIONS(description = "Bartlett kernel lag cap L used in the HAC variance (= formation horizon, 52). Audit field. NULL on non-gate rows."),
+  gate_threshold        FLOAT64   OPTIONS(description = "Pre-committed one-sided critical value (1.64 = α 0.10). Audit field. NULL on non-gate rows."),
+  gate_cost_multiplier  FLOAT64   OPTIONS(description = "Cost level at which the gate is evaluated (1.0 = base); the 1.5/2.0 grid is sensitivity, not the decision. Identifies which row carries the gate. NULL on non-gate rows."),
   PRIMARY KEY (experiment_run_id) NOT ENFORCED
 )
-OPTIONS(description = "Strategy 3 backtest trial ledger: one row per parameter-combination trial (Epic 8 T-25/T-26/T-27). Writer: research/run_experiments.py (T-26).");
+OPTIONS(description = "Strategy 3 backtest trial ledger: one row per parameter-combination trial (Epic 8 T-25/T-26/T-27). Per-run gate stat (TSMOM vs TSH) persisted on the TSMOM base-cost row (gate_* columns). Writer: research/run_experiments.py (T-26).");

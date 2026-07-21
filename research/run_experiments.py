@@ -60,6 +60,8 @@ PORTFOLIO_V1 = PortfolioParams(scheme=Scheme.INVERSE_VOL, crypto_cap=0.20)
 COST_MULTIPLIERS: list[float] = [1.0, 1.5, 2.0]
 
 GATE_THRESHOLD: float = 1.64  # one-sided α=0.10, pre-committed
+GATE_MAX_LAG: int = 52        # Newey-West Bartlett lag L (= formation horizon)
+GATE_COST_MULT: float = 1.0   # gate is evaluated at the base cost only
 
 BQ_TABLE: str = "prod_trade_strategy.experiment_runs"
 
@@ -166,8 +168,14 @@ def _build_row(
     fold_net_returns: list[list[float]],
     n_cv_folds: int,
     run_label: str | None = None,
+    gate: dict | None = None,
 ) -> dict:
-    """Build one experiment_runs row from aggregated fold results."""
+    """Build one experiment_runs row from aggregated fold results.
+
+    ``gate`` is the pre-committed TSMOM-vs-TSH decision stat and its audit
+    fields; it is a per-run scalar, so it is attached to exactly one row (the
+    TSMOM row at the base cost) and left NULL on every other row.
+    """
     sharpes = [annualized_sharpe(r) for r in fold_net_returns]
     sortinos = [annualized_sortino(r) for r in fold_net_returns]
     max_dds = [max_drawdown(r) for r in fold_net_returns]
@@ -199,6 +207,15 @@ def _build_row(
         "holdout_spent": False,
         "holdout_sharpe_net": None,
         "promoted": False,
+        # Gate stat (per run, on the TSMOM base-cost row only; NULL elsewhere).
+        # δ_t = tsmom_net − tsh_net, paired weekly; Newey-West HAC t-stat.
+        "gate_mean_delta": (gate or {}).get("mean_delta"),
+        "gate_t_hac": (gate or {}).get("t_hac"),
+        "gate_pass": (gate or {}).get("pass"),
+        "gate_n_obs": (gate or {}).get("n_obs"),
+        "gate_max_lag": (gate or {}).get("max_lag"),
+        "gate_threshold": (gate or {}).get("threshold"),
+        "gate_cost_multiplier": (gate or {}).get("cost_multiplier"),
     }
 
 
@@ -296,6 +313,23 @@ def run_walk_forward(
         "crypto_cap": PORTFOLIO_V1.crypto_cap,
     })
 
+    # Gate stat at the base cost (GATE_COST_MULT): pool all test-week net returns
+    # and run the paired TSMOM−TSH Newey-West test.  Computed here (before the
+    # rows) so its scalars + audit fields can be persisted on the TSMOM base-cost
+    # row.  n_obs is the pooled test-week count (audit trail for the t-stat).
+    tsmom_pooled = [r for fold in fold_bucket[GATE_COST_MULT]["tsmom"] for r in fold.net_returns]
+    tsh_pooled = [r for fold in fold_bucket[GATE_COST_MULT]["tsh"] for r in fold.net_returns]
+    mean_d, t_stat_hac = compute_gate_stat(tsmom_pooled, tsh_pooled, max_lag=GATE_MAX_LAG)
+    gate = {
+        "mean_delta": mean_d,
+        "t_hac": t_stat_hac,
+        "pass": t_stat_hac > GATE_THRESHOLD,
+        "n_obs": len(tsmom_pooled),
+        "max_lag": GATE_MAX_LAG,
+        "threshold": GATE_THRESHOLD,
+        "cost_multiplier": GATE_COST_MULT,
+    }
+
     result_rows: list[dict] = []
     for cm in COST_MULTIPLIERS:
         tsmom_net = [r.net_returns for r in fold_bucket[cm]["tsmom"]]
@@ -311,6 +345,8 @@ def run_walk_forward(
                 "periods_per_year": TSMOM_V1.periods_per_year,
             }),
             portfolio_json, cm, tsmom_net, n_completed_folds, run_label=run_label,
+            # Attach the per-run gate to exactly the TSMOM base-cost row.
+            gate=gate if cm == GATE_COST_MULT else None,
         ))
         result_rows.append(_build_row(
             json.dumps({"strategy": "tsh", "vol_target": TSMOM_V1.vol_target}),
@@ -326,15 +362,11 @@ def run_walk_forward(
             cm, pas_net, n_completed_folds, run_label=run_label,
         ))
 
-    # Gate stat at base cost (1.0): pool all test-week net returns.
-    tsmom_pooled = [r for fold in fold_bucket[1.0]["tsmom"] for r in fold.net_returns]
-    tsh_pooled = [r for fold in fold_bucket[1.0]["tsh"] for r in fold.net_returns]
-    mean_d, t_stat_hac = compute_gate_stat(tsmom_pooled, tsh_pooled)
-
     return {
         "rows": result_rows,
         "gate_mean_delta": mean_d,
         "gate_t_stat_hac": t_stat_hac,
+        "gate_n_obs": len(tsmom_pooled),
         "fold_bucket": fold_bucket,
         "n_folds": n_completed_folds,
     }
