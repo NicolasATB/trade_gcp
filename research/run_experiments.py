@@ -34,6 +34,7 @@ from backtest.baselines import (
 )
 from backtest.engine import BacktestResult, run_backtest
 from backtest.metrics import (
+    annualized_return,
     annualized_sharpe,
     annualized_sortino,
     calmar_ratio,
@@ -180,6 +181,7 @@ def _build_row(
     sortinos = [annualized_sortino(r) for r in fold_net_returns]
     max_dds = [max_drawdown(r) for r in fold_net_returns]
     calmars = [calmar_ratio(r) for r in fold_net_returns]
+    ann_returns = [annualized_return(r) for r in fold_net_returns]
 
     def _mean(xs: list[float]) -> float:
         return statistics.mean(xs) if xs else 0.0
@@ -196,6 +198,7 @@ def _build_row(
         "cv_sortino_net": _mean(sortinos),
         "cv_max_dd": _mean(max_dds),
         "cv_calmar": _mean(calmars),
+        "cv_ann_return_net": _mean(ann_returns),
         # dsr / hlz_tstat: both NULL in T-26 — deferred to T-27.
         # Both are multiple-testing corrections requiring the full trial grid.
         # With 1 TSMOM trial in T-26, Var(SR)=0 → DSR degenerate; and HLZ
@@ -377,17 +380,18 @@ def _print_results(wf: dict[str, Any]) -> None:  # pragma: no cover
     """Print walk-forward summary table to stdout."""
     rows = wf["rows"]
     print("\nExperiment Results")
-    print("-" * 75)
-    print(f"{'Strategy':<12} {'CostMult':>8} {'CV Sharpe':>10} {'CV Sortino':>11} {'CV MaxDD':>9} {'CV Calmar':>10}")
-    print("-" * 75)
+    print("-" * 88)
+    print(f"{'Strategy':<12} {'CostMult':>8} {'CV Sharpe':>10} {'CV Sortino':>11} {'CV MaxDD':>9} {'CV Calmar':>10} {'AnnRet%':>9}")
+    print("-" * 88)
     for row in rows:
         strat = json.loads(row["tsmom_params_json"]).get("strategy", "tsmom")
         print(
             f"{strat:<12} {row['cost_multiplier']:>8.1f} "
             f"{row['cv_sharpe_net']:>10.3f} {row['cv_sortino_net']:>11.3f} "
-            f"{row['cv_max_dd']:>9.3f} {row['cv_calmar']:>10.3f}"
+            f"{row['cv_max_dd']:>9.3f} {row['cv_calmar']:>10.3f} "
+            f"{row['cv_ann_return_net'] * 100:>9.2f}"
         )
-    print("-" * 75)
+    print("-" * 88)
     mean_d = wf["gate_mean_delta"]
     t_hac = wf["gate_t_stat_hac"]
     gate_pass = "PASS" if t_hac > GATE_THRESHOLD else "FAIL"

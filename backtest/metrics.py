@@ -121,6 +121,25 @@ def max_drawdown(returns: list[float]) -> float:
     return worst_dd
 
 
+def annualized_return(returns: list[float], periods_per_year: int = 52) -> float:
+    """Geometric annualized return of an equity curve built from ``returns``.
+
+    Args:
+        returns: Period simple returns (the portfolio's excess-return series),
+            oldest first.
+        periods_per_year: Annualization factor (52 for weekly).
+
+    Returns:
+        Annualized return as a fraction (e.g. ``0.10`` for +10 %/yr).  Returns
+        ``0.0`` for fewer than two observations.
+    """
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    total = math.prod(1.0 + r for r in returns)
+    return total ** (periods_per_year / n) - 1.0
+
+
 def calmar_ratio(returns: list[float], periods_per_year: int = 52) -> float:
     """Annualized return divided by the absolute maximum drawdown.
 
@@ -134,9 +153,7 @@ def calmar_ratio(returns: list[float], periods_per_year: int = 52) -> float:
     """
     if len(returns) < 2:
         return 0.0
-    n = len(returns)
-    total = math.prod(1.0 + r for r in returns)
-    ann_return = total ** (periods_per_year / n) - 1.0
+    ann_return = annualized_return(returns, periods_per_year)
     mdd = abs(max_drawdown(returns))
     if mdd == 0.0:
         return float("inf") if ann_return > 0 else 0.0

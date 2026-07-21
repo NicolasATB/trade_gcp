@@ -7,6 +7,7 @@ import math
 import pytest
 
 from backtest.metrics import (
+    annualized_return,
     annualized_sharpe,
     annualized_sortino,
     calmar_ratio,
@@ -75,6 +76,31 @@ class TestMaxDrawdown:
         returns = [-0.05] * 10
         dd = max_drawdown(returns)
         assert dd < -0.3  # compound 10 × −5% loss is large
+
+
+class TestAnnualizedReturn:
+    def test_zero_returns_zero(self):
+        assert annualized_return([0.0] * 52) == 0.0
+
+    def test_fewer_than_two_returns_zero(self):
+        assert annualized_return([0.05]) == 0.0
+
+    def test_negative_series_is_negative(self):
+        assert annualized_return([-0.01] * 52) < 0.0
+
+    def test_constant_weekly_compounds_to_annual(self):
+        # 52 weeks of +1% → (1.01)^52 − 1 ≈ 0.6777.
+        assert annualized_return([0.01] * 52) == pytest.approx(1.01 ** 52 - 1)
+
+    def test_annualization_scales_short_series(self):
+        # 4 weeks of +1% annualize to the same as 52 weeks of +1%.
+        assert annualized_return([0.01] * 4) == pytest.approx(1.01 ** 52 - 1)
+
+    def test_is_calmar_numerator(self):
+        # calmar = annualized_return / |max_drawdown| — verify consistency.
+        returns = [0.02, -0.005] * 26
+        expected = annualized_return(returns) / abs(max_drawdown(returns))
+        assert calmar_ratio(returns) == pytest.approx(expected)
 
 
 class TestCalmarRatio:

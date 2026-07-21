@@ -1397,6 +1397,7 @@ CREATE TABLE IF NOT EXISTS `trade-390514.prod_trade_strategy.experiment_runs` (
   cv_sortino_net        FLOAT64   OPTIONS(description = "Mean per-fold net Sortino across all CV folds."),
   cv_max_dd             FLOAT64   OPTIONS(description = "Mean per-fold maximum drawdown (≤ 0) across all CV folds."),
   cv_calmar             FLOAT64   OPTIONS(description = "Mean per-fold Calmar ratio across all CV folds."),
+  cv_ann_return_net     FLOAT64   OPTIONS(description = "Mean per-fold geometric annualized net return (excess-return basis, ×52 weekly). E.g. 0.10 = +10%/yr. Same series as cv_sharpe_net."),
   dsr                   FLOAT64   OPTIONS(description = "Deflated Sharpe Ratio (Bailey & López de Prado 2014) over all trial Sharpes at time of evaluation."),
   pbo                   FLOAT64   OPTIONS(description = "Probability of Backtest Overfitting (CSCV, López de Prado 2018) ∈ [0, 1]."),
   hlz_tstat             FLOAT64   OPTIONS(description = "Harvey-Liu-Zhu (2016) t-stat after multiple-testing haircut."),
