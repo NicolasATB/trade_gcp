@@ -622,20 +622,21 @@ correct. `dsr=NULL`, `hlz_tstat=NULL` in all T-26 `experiment_runs` rows.
 
 | Strategy | Cost mult | CV Sharpe (net) | CV Sortino | Ann. ret (net) | Gate t-stat (HAC) |
 |---|---|---|---|---|---|
-| TSMOM seed v1 | 1.0 | 0.615 | 0.952 | ~5.6% | **0.384 — FAIL** |
-| TSH | 1.0 | 0.582 | 0.832 | ~8.8% | (ref) |
-| Vol-BH | 1.0 | 0.780 | 1.129 | ~10.2% | — |
-| 60/40 passive | 1.0 | 0.622 | 0.897 | ~12.9% | — |
+| TSMOM seed v1 | 1.0 | 0.615 | 0.952 | 5.91% | **0.384 — FAIL** |
+| TSH | 1.0 | 0.582 | 0.832 | 4.86% | (ref) |
+| Vol-BH | 1.0 | 0.780 | 1.129 | 5.81% | — |
+| 60/40 passive | 1.0 | 0.622 | 0.897 | 6.81% | — |
 
 Cost sensitivity (net CV Sharpe at ×1.0 / ×1.5 / ×2.0): TSMOM 0.615 / 0.573 / 0.532;
 TSH 0.582 / 0.573 / 0.563; vol-BH 0.780 / 0.769 / 0.757; 60/40 0.622 / 0.621 / 0.620.
 
-*Ann. ret (net)* is the geometric annualized excess return, net of costs (`cv_ann_return_net`,
-persisted per run since T-26b). Shown ≈ `Calmar × |MaxDD|` here; the exact per-fold-mean value
-lands in `experiment_runs` on the next run. **Read it with the risk basis:** TSMOM/TSH/vol-BH are
-vol-scaled to ~10%, so returns are comparable; 60/40 runs at its *natural* vol (bigger MaxDD −24%),
-so its higher ~12.9% is not risk-comparable. vol-BH's ~10.2% at the best Sharpe (0.780) is the
-honest bar — TSMOM's ~5.6% (Sharpe 0.615) undershoots simply holding the book vol-scaled.
+*Ann. ret (net)* is the geometric annualized excess return, net of costs — the exact per-fold
+mean (`cv_ann_return_net`, T-26b). **The raw returns are compressed (4.9–6.8%) and do not
+separate the strategies; the differentiator is efficiency, not level.** Read with the risk
+basis: TSMOM/TSH/vol-BH are vol-scaled to ~10%, while 60/40 runs at its natural (higher) vol, so
+its 6.81% carries the worst drawdown (−24%) and a middling Sharpe. **vol-BH earns essentially the
+same return as TSMOM (5.81% vs 5.91%) at a far better Sharpe (0.780 vs 0.615)** — the vol scaling,
+not the momentum signal, does the work; TSMOM takes more risk for no return premium.
 
 **Reading (gate only — the verdict belongs to T-27/T-28):**
 
